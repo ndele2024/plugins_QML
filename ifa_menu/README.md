@@ -27,6 +27,9 @@ IFA 2.0
 | `IfaChantier.qml` | Bandeau « fonction en cours de développement » des squelettes. |
 | `Referentiels.qml` | Listes de référence (régions, types d'UE) et accès défensifs aux couches. |
 | `SelecteurEmprise.qml` | Tracé d'une emprise polygonale sur la carte — voir §6. |
+| `ServiceUE.qml` | Accès aux unités d'échantillonnage — **bouchon**, voir §7. |
+| `TableauUE.qml` | Liste des unités : tableau sur grand écran, fiches sur téléphone. |
+| `EtiquetteVerrou.qml` | Pastille d'état de verrouillage d'une UE. |
 | `FenetreCreerUE.qml` | Formulaire de création d'une UE — **le modèle à suivre** pour les autres. |
 | `Fenetre*.qml` | Une fenêtre par commande. |
 | `metadata.txt`, `icon.svg` | Identité du plugin dans la liste des plugins de QField. |
@@ -248,7 +251,64 @@ créé.
 
 ---
 
-## 7. Bon à savoir
+## 7. Consulter une UE
+
+La fenêtre enchaîne deux étapes.
+
+**Étape 1 — filtre.** Quatre critères : région, n° de plan d'eau, zone
+personnalisée (le `SelecteurEmprise` du §6, réutilisé tel quel), ou code d'UE
+exact (`une_code_ident`, ex. `02-12777-IPE`).
+
+**Étape 2 — résultats.** Un rappel du filtre avec un bouton « Modifier », puis
+la liste des unités. Les colonnes reprennent la table `unite_echan` :
+
+| Colonne | Champ |
+|---|---|
+| Code UE | `une_code_ident` |
+| Type d'UE | `tue_nom` (via `tue_code_ident`) |
+| Verrou | `une_ind_verro` (`O`/`N`) + `une_nom_propr_verro` en infobulle |
+| Créée le / Par | `une_date_creat` / `une_code_utili_creat` |
+| Modifiée le | `une_date_maj` |
+| Actions | ouvrir et verrouiller · ouvrir sans verrouiller · supprimer |
+
+Une unité déjà verrouillée voit « ouvrir et verrouiller » et « supprimer »
+désactivés, l'infobulle nommant le détenteur du verrou. La suppression passe
+obligatoirement par une confirmation qui nomme l'unité.
+
+`TableauUE` bascule en fiches empilées sous 640 px de large. Un tableau de neuf
+colonnes n'est pas seulement illisible sur un téléphone : atteindre la corbeille
+demanderait un défilement horizontal, geste propice aux suppressions
+accidentelles.
+
+### ⚠️ Le service est un bouchon
+
+`ServiceUE.qml` **fabrique les résultats localement** — le point d'accès
+QFieldCloud n'existe pas encore. Le générateur utilise les formats relevés dans
+les données réelles (codes `RR-NNNNN-TYPE`, `une_ind_verro` valant `O`/`N`,
+horodatages ISO 8601, codes d'utilisateur à six caractères) et il est **à
+graine** : un même filtre rend toujours le même jeu de données, ce qui rend les
+essais reproductibles.
+
+Le jour où le backend arrive, **seul ce fichier change** : ni `FenetreConsulterUE`
+ni `TableauUE` n'ont à bouger. Passer `simulation` à `false` et implémenter
+`rechercher()` en respectant le contrat décrit dans l'en-tête du fichier.
+
+Rappel du piège d'authentification : le plugin doit envoyer un `User-Agent`
+du type `sdk|ifa-plugin/1.0`. Un en-tête commençant par `qfield|` ferait expirer
+le jeton de QField lui-même (`AuthToken.single_token_clients`, côté serveur) et
+déconnecterait le technicien.
+
+Deux points restent à traiter côté serveur avant la mise en service :
+
+- **la pagination** — `unite_echan` compte environ 142 000 lignes ; un filtre par
+  région en renvoie encore plusieurs milliers ;
+- **les trois actions** — verrouillage, ouverture en lecture et suppression sont
+  aujourd'hui de simples notifications (voir les `TODO` en fin de
+  `FenetreConsulterUE.qml`).
+
+---
+
+## 8. Bon à savoir
 
 **Recharger après modification.** QField ne contourne le cache QML que pour le
 fichier principal du plugin. Les composants voisins (`MenuPrincipal.qml`,

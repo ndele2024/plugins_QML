@@ -62,6 +62,10 @@ Popup {
   // Marge intérieure de la zone de contenu.
   property real margeContenu: 16
 
+  // Largeur maximale sur grand écran. À augmenter pour une fenêtre qui affiche
+  // un tableau plutôt qu'un formulaire.
+  property real largeurMax: 560
+
   // ---------------------------------------------------------------------------
   //  Dimensionnement responsive
   // ---------------------------------------------------------------------------
@@ -90,7 +94,7 @@ Popup {
   readonly property color surAccent: (0.299 * accent.r + 0.587 * accent.g + 0.114 * accent.b) > 0.6 ? Theme.darkGray : "#ffffff"
 
   parent: zoneUtile
-  width: !zoneUtile ? 0 : (compact ? zoneUtile.width : Math.min(zoneUtile.width * 0.9, 560))
+  width: !zoneUtile ? 0 : (compact ? zoneUtile.width : Math.min(zoneUtile.width * 0.9, largeurMax))
   height: !zoneUtile ? 0 : (compact ? zoneUtile.height : Math.min(zoneUtile.height * 0.92, 760))
   x: zoneUtile ? (zoneUtile.width - width) / 2 : 0
   y: zoneUtile ? (zoneUtile.height - height) / 2 : 0
