@@ -27,7 +27,8 @@ IFA 2.0
 | `IfaChantier.qml` | Bandeau « fonction en cours de développement » des squelettes. |
 | `Referentiels.qml` | Listes de référence (régions, types d'UE) et accès défensifs aux couches. |
 | `SelecteurEmprise.qml` | Tracé d'une emprise polygonale sur la carte — voir §6. |
-| `ServiceUE.qml` | Accès aux unités d'échantillonnage — **bouchon**, voir §7. |
+| `SessionCloud.qml` | Jeton et appels authentifiés à QFieldCloud — voir §9. |
+| `ServiceUE.qml` | Recherche des unités d'échantillonnage sur le serveur — voir §7. |
 | `TableauUE.qml` | Liste des unités : tableau sur grand écran, fiches sur téléphone. |
 | `EtiquetteVerrou.qml` | Pastille d'état de verrouillage d'une UE. |
 | `FenetreCreerUE.qml` | Formulaire de création d'une UE — **le modèle à suivre** pour les autres. |
@@ -130,6 +131,7 @@ Ajouter un **menu** entier suit la même logique : une entrée de plus dans
 | Élément | Usage |
 |---|---|
 | `referentiels` | Injecté automatiquement — voir §4. |
+| `session` | Injectée automatiquement — appels authentifiés au serveur, voir §9. |
 | `avertir(message, type)` | Notification QField. `type` : `"info"`, `"warning"`, `"error"`. |
 | `compact` | `true` sur écran étroit (< 520 px), pour adapter la mise en page. |
 | `accent`, `surAccent` | Couleur d'accent et couleur de texte contrastée correspondante. |
@@ -225,9 +227,18 @@ QField pour numériser sans GPS.
 4. **Terminer** (3 sommets minimum) referme le calque et rouvre le formulaire,
    avec la saisie intacte.
 
-La fenêtre n'est pas détruite pendant le tracé : le `Loader` de `main.qml` ne
-libère une fenêtre qu'au chargement de la suivante, précisément pour que ce
-va-et-vient préserve la saisie en cours.
+Deux points de `main.qml` rendent ce va-et-vient possible :
+
+- le `Loader` ne libère une fenêtre qu'au chargement de la **suivante**, jamais à
+  sa fermeture — sinon `close()` détruirait le formulaire et toute la saisie ;
+- `ouvrirCommande()` **ferme le menu** avant de charger la fenêtre. Le menu est
+  modal : le laisser ouvert en arrière-plan laisserait son voile intercepter les
+  gestes, et la fenêtre qui se referme pour libérer la carte retomberait sur le
+  menu au lieu de la carte.
+
+Le menu n'est pas rouvert à la fermeture d'une commande : « Créer une UE »
+enchaîne sur le formulaire de saisie de QField, que le menu masquerait. Le bouton
+de la barre d'outils reste disponible pour y revenir.
 
 Pour réutiliser le sélecteur dans une autre fenêtre :
 
@@ -256,8 +267,14 @@ créé.
 La fenêtre enchaîne deux étapes.
 
 **Étape 1 — filtre.** Quatre critères : région, n° de plan d'eau, zone
-personnalisée (le `SelecteurEmprise` du §6, réutilisé tel quel), ou code d'UE
-exact (`une_code_ident`, ex. `02-12777-IPE`).
+personnalisée (le `SelecteurEmprise` du §6, réutilisé tel quel), ou fragment de
+code d'UE.
+
+Le critère « Code d'UE » est une **recherche partielle** : le serveur cherche la
+saisie n'importe où dans `une_code_ident`, sans tenir compte de la casse. Un
+technicien qui tape `12777` obtient les unités de ce plan d'eau tous types
+confondus, `ANRO` celles du réseau, `02-127` celles dont le code commence ainsi.
+Deux caractères au minimum — en deçà, le bouton « Rechercher » reste désactivé.
 
 **Étape 2 — résultats.** Un rappel du filtre avec un bouton « Modifier », puis
 la liste des unités. Les colonnes reprennent la table `unite_echan` :
@@ -280,31 +297,65 @@ colonnes n'est pas seulement illisible sur un téléphone : atteindre la corbeil
 demanderait un défilement horizontal, geste propice aux suppressions
 accidentelles.
 
-### ⚠️ Le service est un bouchon
+### D'où viennent les résultats
 
-`ServiceUE.qml` **fabrique les résultats localement** — le point d'accès
-QFieldCloud n'existe pas encore. Le générateur utilise les formats relevés dans
-les données réelles (codes `RR-NNNNN-TYPE`, `une_ind_verro` valant `O`/`N`,
-horodatages ISO 8601, codes d'utilisateur à six caractères) et il est **à
-graine** : un même filtre rend toujours le même jeu de données, ce qui rend les
-essais reproductibles.
+`ServiceUE.qml` interroge le point d'accès QFieldCloud
 
-Le jour où le backend arrive, **seul ce fichier change** : ni `FenetreConsulterUE`
-ni `TableauUE` n'ont à bouger. Passer `simulation` à `false` et implémenter
-`rechercher()` en respectant le contrat décrit dans l'en-tête du fichier.
+```
+POST /api/v1/ifa/unites/recherche/
+```
 
-Rappel du piège d'authentification : le plugin doit envoyer un `User-Agent`
-du type `sdk|ifa-plugin/1.0`. Un en-tête commençant par `qfield|` ferait expirer
-le jeton de QField lui-même (`AuthToken.single_token_clients`, côté serveur) et
-déconnecterait le technicien.
+servi par l'application Django `qfieldcloud.ifa` (dossier
+`QfieldCloud-ifa/docker-app/qfieldcloud/ifa/`). Celle-ci lit la base métier du
+ministère — schéma `ifa_data`, **en lecture seule** — de sorte que QField n'a
+jamais d'accès direct à PostgreSQL.
 
-Deux points restent à traiter côté serveur avant la mise en service :
+Corps de la requête, un critère à la fois :
 
-- **la pagination** — `unite_echan` compte environ 142 000 lignes ; un filtre par
-  région en renvoie encore plusieurs milliers ;
-- **les trois actions** — verrouillage, ouverture en lecture et suppression sont
-  aujourd'hui de simples notifications (voir les `TODO` en fin de
-  `FenetreConsulterUE.qml`).
+```json
+{ "mode": "region",  "valeur": "02" }
+{ "mode": "lce",     "valeur": "12777" }
+{ "mode": "code",    "valeur": "12777" }        // fragment, casse indifférente
+{ "mode": "emprise", "wkt": "POLYGON((…))", "bbox": [xmin, ymin, xmax, ymax] }
+```
+
+Réponse :
+
+```json
+{ "mode": "region", "total": 12561, "limite": 200, "decalage": 0,
+  "tronque": true, "resultats": [ … ] }
+```
+
+Deux points valent d'être connus côté serveur :
+
+- **la région ne se lit pas dans le code d'UE.** Le préfixe (`02-…`) s'en
+  approche mais ment : plus de 5 000 unités portent un préfixe différent de la
+  région de leur projet. La source qui fait foi est `proje_sonda.rad_no`,
+  atteinte par les mesurages de l'unité.
+- **la zone personnalisée s'appuie sur `infor_gener.shape`** (EPSG:32187). Le
+  polygone du filtre est reprojeté vers ce SRID plutôt que l'inverse :
+  transformer 638 000 points à chaque recherche condamnerait l'index GiST.
+
+### Pagination
+
+`unite_echan` compte environ 142 000 lignes et une recherche par région en
+renvoie plus de 12 000 : le serveur ne rend qu'une page (200 unités par
+défaut). La fenêtre affiche le décompte complet et un bouton « Afficher les
+suivantes » ; `ServiceUE` cumule les pages et rend au signal `resultats` la
+liste entière, de sorte que ni `FenetreConsulterUE` ni `TableauUE` n'ont à
+recoller quoi que ce soit.
+
+### Authentification
+
+`SessionCloud.qml` s'occupe du jeton — voir §9.
+
+### Ce qui reste à faire
+
+**Les trois actions** — verrouillage, ouverture en lecture et suppression — sont
+encore de simples notifications : les points d'accès correspondants n'existent
+pas côté serveur (voir les `TODO` en fin de `FenetreConsulterUE.qml`). Le verrou
+affiché dans le tableau, lui, est bien celui de la base : une unité tenue par
+quelqu'un d'autre a déjà ses actions désactivées.
 
 ---
 
@@ -332,3 +383,52 @@ automatiquement une couleur de texte lisible sur l'accent choisi.
 
 **Cible tactile.** Les lignes de commande font au moins 64 px de haut, pour
 rester utilisables avec des gants.
+
+---
+
+## 9. SessionCloud — parler au serveur
+
+`SessionCloud.qml` porte l'URL du serveur, le jeton, et une seule fonction
+utile :
+
+```js
+session.appeler("POST", "/api/v1/ifa/unites/recherche/", corps,
+                function (donnees) { … },        // succès, réponse décodée
+                function (message) { … });       // échec, message affichable
+```
+
+Une instance unique est créée dans `main.qml` et injectée dans chaque fenêtre
+sous le nom `session`, comme `referentiels`.
+
+**Rien n'est codé en dur.** L'URL et le nom d'utilisateur viennent de l'objet
+`QFieldCloudConnection` de QField, atteint par son `objectName`. Le même plugin
+fonctionne donc sur l'instance locale, sur le VPS ou sur une adresse de réseau
+local, sans être ré-édité.
+
+**Le jeton de QField n'est pas empruntable.** `token()`, `get()` et `post()` de
+`QFieldCloudConnection` sont de simples fonctions C++ — ni `Q_PROPERTY` ni
+`Q_INVOKABLE` — donc invisibles depuis QML. Le plugin obtient son propre jeton
+par `POST /api/v1/auth/login/`, en demandant le mot de passe si QField ne le
+détient pas. Le mot de passe ne vit que le temps de l'appel : il n'est ni
+conservé ni journalisé.
+
+**Le jeton peut être révoqué sous nos pieds.** Côté serveur,
+`AuthToken.single_token_clients` fait expirer les jetons antérieurs du même
+utilisateur **et du même type de client**. Les requêtes QML partent avec le
+`User-Agent` par défaut de Qt (`Mozilla/5.0`), que le serveur classe en
+`unknown` : deux plugins IFA sur le même appareil se disputeraient donc le
+jeton. D'où la reprise automatique sur `401` — le jeton est jeté, une nouvelle
+authentification est demandée, la requête est rejouée **une** fois.
+
+> **À corriger dans les notes plus anciennes :** on lit parfois qu'il faudrait
+> envoyer un `User-Agent` du type `sdk|ifa-plugin/1.0` pour éviter d'expirer le
+> jeton de QField. C'est impossible et inutile. Impossible : Qt refuse cet
+> en-tête dans `XMLHttpRequest` (liste noire de `QQmlXMLHttpRequest`) et
+> `setRequestHeader` l'ignore silencieusement. Inutile : le jeton de QField est
+> de type `qfield`, et `single_token_clients` ne fait expirer que les jetons
+> **du même type** — un jeton `unknown` ne peut pas le toucher. Vérifié dans la
+> table `authentication_authtoken` du serveur local.
+
+**Une minuterie par requête.** Plusieurs recherches peuvent être en vol en même
+temps ; un `Timer` unique les mélangerait. Au-delà de 30 secondes, l'appel rend
+un message plutôt qu'un sablier éternel.

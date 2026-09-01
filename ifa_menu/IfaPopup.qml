@@ -53,6 +53,10 @@ Popup {
   // Données de référence partagées, injectées par main.qml (Referentiels.qml).
   property var referentiels: null
 
+  // Session QFieldCloud partagée, injectée par main.qml (SessionCloud.qml).
+  // Les fenêtres qui n'interrogent pas le serveur l'ignorent simplement.
+  property var session: null
+
   // Contenu principal de la fenêtre.
   default property alias contenu: colonne.data
 

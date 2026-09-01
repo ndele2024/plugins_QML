@@ -6,10 +6,13 @@
 //    0. Filtre    — région, n° de plan d'eau, zone personnalisée, ou code d'UE.
 //    1. Résultats — tableau des unités renvoyées, avec trois actions par ligne.
 //
-//  ⚠️ Le point d'accès serveur n'existe pas encore : les résultats proviennent
-//  de ServiceUE, qui les fabrique localement. Voir l'en-tête de ServiceUE.qml
-//  pour le contrat à respecter le jour où le backend arrive — c'est le seul
-//  fichier à reprendre, cette fenêtre n'a pas à changer.
+//  Les résultats viennent du point d'accès `POST /api/v1/ifa/unites/recherche/`
+//  de QFieldCloud, par l'intermédiaire de `ServiceUE` (interrogation) et de
+//  `SessionCloud` (jeton). Voir l'en-tête de ces deux fichiers.
+//
+//  La réponse est paginée : une recherche par région dépasse couramment les
+//  10 000 unités. La fenêtre affiche le décompte complet et propose de charger
+//  la suite ; `ServiceUE` rend la liste déjà cumulée.
 // =============================================================================
 
 import QtQuick
@@ -25,7 +28,7 @@ IfaPopup {
   id: fenetre
 
   titre: qsTr("Consulter une UE")
-  soustitre: etape === 0 ? qsTr("Choisir un filtre de recherche") : qsTr("%n unité(s) trouvée(s)", "", unites.length)
+  soustitre: etape === 0 ? qsTr("Choisir un filtre de recherche") : qsTr("%n unité(s) trouvée(s)", "", service.total)
   icone: "ic_baseline_search_white"
   accent: Theme.cloudColor
 
@@ -57,7 +60,10 @@ IfaPopup {
     if (modeFiltre === "lce")
       return champLce.text !== "";
     if (modeFiltre === "code")
-      return champCode.text.trim() !== "";
+      // Le serveur refuse en deçà : autant désactiver le bouton plutôt
+      // que de rapporter une erreur pour une saisie manifestement trop
+      // courte.
+      return champCode.text.trim().length >= 2;
     return empriseWkt !== "";
   }
 
@@ -152,6 +158,10 @@ IfaPopup {
     }
 
     // ---- Code d'UE ---------------------------------------------------------------
+    //  La recherche est partielle : n'importe quel fragment du code convient.
+    //  D'où l'absence de `Qt.ImhUppercaseOnly` — quelques familles historiques
+    //  (réseau ANRO) portent des minuscules, et forcer les capitales à l'écran
+    //  laisserait croire qu'elles comptent. Le serveur ignore la casse.
     Label {
       Layout.fillWidth: fenetre.compact
       visible: fenetre.modeFiltre === "code"
@@ -170,14 +180,13 @@ IfaPopup {
 
         Layout.fillWidth: true
         font: Theme.strongFont
-        placeholderText: qsTr("ex. 02-12777-IPE")
-        inputMethodHints: Qt.ImhUppercaseOnly
+        placeholderText: qsTr("ex. 12777, ANRO, 02-127…")
         onAccepted: fenetre.lancerRecherche()
       }
 
       Label {
         Layout.fillWidth: true
-        text: qsTr("Format : région – n° de plan d'eau – type d'UE")
+        text: qsTr("Recherche partielle : tout fragment du code convient, majuscules ou non. Deux caractères minimum.")
         font: Theme.tinyFont
         color: Theme.secondaryTextColor
         wrapMode: Text.WordWrap
@@ -309,11 +318,13 @@ IfaPopup {
     }
 
     // ---- Interrogation en cours --------------------------------------------------
+    //  Masqué pendant le chargement d'une page suivante : le tableau reste à
+    //  l'écran, l'attente est signalée par le bouton en bas.
     ColumnLayout {
       Layout.fillWidth: true
       Layout.topMargin: 30
       Layout.bottomMargin: 30
-      visible: service.enCours
+      visible: service.enCours && fenetre.unites.length === 0
       spacing: 14
 
       BusyIndicator {
@@ -390,7 +401,9 @@ IfaPopup {
     TableauUE {
       Layout.fillWidth: true
 
-      visible: !service.enCours && fenetre.unites.length > 0
+      // Le tableau reste affiché pendant le chargement d'une page suivante :
+      // le faire disparaître ferait sauter l'écran sous les doigts.
+      visible: fenetre.unites.length > 0
 
       lignes: fenetre.unites
       accent: fenetre.accent
@@ -403,6 +416,43 @@ IfaPopup {
       }
       onSupprimer: function (unite) {
         fenetre.demanderSuppression(unite);
+      }
+    }
+
+    // ---- Suite des résultats ------------------------------------------------------
+    //  Le serveur ne rend qu'une page à la fois. Afficher le reste est un
+    //  geste volontaire : sur une liaison de terrain, charger 12 000 unités
+    //  sans le demander serait au mieux long, au pire coûteux.
+    RowLayout {
+      Layout.fillWidth: true
+      Layout.topMargin: 4
+
+      visible: fenetre.unites.length > 0 && (service.tronque || service.enCours)
+      spacing: 10
+
+      Label {
+        Layout.fillWidth: true
+        text: qsTr("%1 sur %2 affichées").arg(fenetre.unites.length).arg(service.total)
+        font: Theme.tipFont
+        color: Theme.secondaryTextColor
+        wrapMode: Text.WordWrap
+      }
+
+      BusyIndicator {
+        Layout.preferredWidth: 22
+        Layout.preferredHeight: 22
+        running: service.enCours
+        visible: service.enCours
+      }
+
+      QfButton {
+        visible: service.tronque
+        text: qsTr("Afficher les suivantes")
+        enabled: !service.enCours
+        bgcolor: "transparent"
+        color: fenetre.accent
+        borderColor: Theme.controlBorderColor
+        onClicked: service.pageSuivante()
       }
     }
   }
@@ -441,7 +491,7 @@ IfaPopup {
   ServiceUE {
     id: service
 
-    referentiels: fenetre.referentiels
+    session: fenetre.session
 
     onResultats: function (lignes) {
       fenetre.unites = lignes;
@@ -449,7 +499,9 @@ IfaPopup {
     }
 
     onEchec: function (message) {
-      fenetre.unites = [];
+      // Les unités déjà reçues restent affichées : si c'est le chargement
+      // d'une page suivante qui a échoué, vider la liste ferait perdre au
+      // technicien ce qu'il avait sous les yeux.
       fenetre.messageErreur = message;
     }
   }
@@ -589,7 +641,7 @@ IfaPopup {
     if (modeFiltre === "code")
       return {
         "mode": "code",
-        "valeur": champCode.text.trim().toUpperCase()
+        "valeur": champCode.text.trim()
       };
 
     return {
@@ -605,7 +657,7 @@ IfaPopup {
     if (modeFiltre === "lce")
       return qsTr("Plan d'eau n° %1").arg(champLce.text);
     if (modeFiltre === "code")
-      return qsTr("Code d'UE : %1").arg(champCode.text.trim().toUpperCase());
+      return qsTr("Code contenant « %1 »").arg(champCode.text.trim());
     return qsTr("Zone personnalisée — %n sommet(s)", "", empriseNombreSommets);
   }
 
@@ -627,11 +679,16 @@ IfaPopup {
   }
 
   // ---- Actions sur une unité -------------------------------------------------------
-  // TODO : à brancher sur le point d'accès QFieldCloud (voir ServiceUE.qml).
-  //   * verrouiller  → POST .../unites/<code>/verrou/  puis ouverture du
-  //                    formulaire « mesurage » en écriture ;
+  // La recherche est branchée sur le serveur ; les trois actions ne le sont
+  // pas encore. Points d'accès à ajouter dans `qfieldcloud.ifa` :
+  //   * verrouiller  → POST /api/v1/ifa/unites/<code>/verrou/ puis ouverture
+  //                    du formulaire « mesurage » en écriture ;
   //   * consulter    → ouverture du même formulaire en lecture seule ;
-  //   * supprimer    → DELETE .../unites/<code>/.
+  //   * supprimer    → DELETE /api/v1/ifa/unites/<code>/.
+  //
+  // Le verrou renvoyé par la recherche (`une_ind_verro`, `une_nom_propr_verro`)
+  // est déjà celui de la base : le tableau désactive correctement les actions
+  // sur une unité tenue par quelqu'un d'autre.
   function ouvrirUnite(unite, avecVerrou) {
     referentiels.definirVariableProjet("une_code_ident", unite["une_code_ident"]);
 
@@ -653,7 +710,9 @@ IfaPopup {
     if (!unite)
       return;
 
-    // Retrait local, le temps que le service de suppression existe.
+    // Retrait local, le temps que le service de suppression existe. L'unité
+    // reste dans la base : elle réapparaîtra au prochain « Afficher les
+    // suivantes », qui renvoie la liste telle que le serveur la connaît.
     const restantes = [];
     for (let i = 0; i < unites.length; ++i) {
       if (unites[i]["une_code_ident"] !== unite["une_code_ident"])

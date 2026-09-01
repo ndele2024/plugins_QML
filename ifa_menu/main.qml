@@ -29,6 +29,8 @@
 //    IfaCommande.qml           une ligne de commande du menu
 //    IfaChantier.qml           bandeau « fonction à venir »
 //    Referentiels.qml          listes de référence + accès aux couches
+//    SessionCloud.qml          jeton et appels authentifiés à QFieldCloud
+//    ServiceUE.qml             recherche des UE sur le serveur
 //    Fenetre*.qml              une fenêtre par commande
 // =============================================================================
 
@@ -109,6 +111,13 @@ Item {
   // propriété elle-même, pas sur cet objet.
   Referentiels {
     id: donneesReferentiels
+  }
+
+  // Session QFieldCloud : URL du serveur, jeton et appels authentifiés. Une
+  // seule instance également — deux sessions demanderaient deux fois le mot de
+  // passe et se voleraient mutuellement leur jeton (voir SessionCloud.qml).
+  SessionCloud {
+    id: sessionCloud
   }
 
   // ===========================================================================
@@ -196,6 +205,7 @@ Item {
         return;
 
       item.referentiels = donneesReferentiels;
+      item.session = sessionCloud;
       item.open();
     }
 
@@ -216,6 +226,17 @@ Item {
       avertir(qsTr("« %1 » n'est pas encore disponible.").arg(commande ? commande.titre : ""), "info");
       return;
     }
+
+    // Le menu doit se refermer, et pas seulement passer au second plan : c'est
+    // une fenêtre modale, son voile continuerait sinon d'intercepter les gestes
+    // même une fois recouverte. Une fenêtre qui se referme pour libérer la
+    // carte — le tracé d'emprise — retomberait alors sur le menu au lieu de la
+    // carte.
+    //
+    // Le menu n'est pas rouvert à la fermeture de la commande : « Créer une UE »
+    // enchaîne sur le formulaire de saisie de QField, que le menu masquerait.
+    // Le bouton de la barre d'outils reste disponible pour y revenir.
+    menuPrincipal.close();
 
     // Décharge explicitement la fenêtre précédente avant d'en charger une
     // autre : sans cela, réactiver la même commande ne relance pas onLoaded.
