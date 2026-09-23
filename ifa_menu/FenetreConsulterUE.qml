@@ -3,8 +3,14 @@
 // =============================================================================
 //  Deux étapes dans une même fenêtre :
 //
-//    0. Filtre    — région, n° de plan d'eau, zone personnalisée, ou code d'UE.
+//    0. Filtre    — région, n° de plan d'eau, nom de bassin, zone
+//                   personnalisée, code d'UE — seuls ou croisés.
 //    1. Résultats — tableau des unités renvoyées, avec trois actions par ligne.
+//
+//  Les critères se cochent indépendamment et se croisent : une unité doit les
+//  satisfaire tous. Chaque critère coché resserre donc la liste. C'est ce qui
+//  rend la recherche par région praticable — seule, elle rend plus de douze
+//  mille unités ; croisée avec un bassin, elle en rend quelques dizaines.
 //
 //  Les résultats viennent du point d'accès `POST /api/v1/ifa/unites/recherche/`
 //  de QFieldCloud, par l'intermédiaire de `ServiceUE` (interrogation) et de
@@ -28,12 +34,18 @@ IfaPopup {
   id: fenetre
 
   titre: qsTr("Consulter une UE")
-  soustitre: etape === 0 ? qsTr("Choisir un filtre de recherche") : qsTr("%n unité(s) trouvée(s)", "", service.total)
+  soustitre: etape === 0 ? qsTr("Choisir un ou plusieurs critères") : qsTr("%n unité(s) trouvée(s)", "", service.total)
   icone: "ic_baseline_search_white"
   accent: Theme.cloudColor
 
   // Un tableau a besoin de plus de place qu'un formulaire.
   largeurMax: 920
+
+  // Bandeau d'attente épinglé sous l'en-tête (voir `IfaPopup`). Le verrouillage
+  // puis le packaging prennent de quelques secondes à quelques minutes, et la
+  // liste des résultats défile : un bandeau posé dans le flux sortirait de
+  // l'écran au moment même où le technicien clique.
+  activite: ouverture.enCours ? messageOuverture : ""
 
   // ---------------------------------------------------------------------------
   //  État
@@ -41,12 +53,41 @@ IfaPopup {
   // 0 = choix du filtre, 1 = résultats
   property int etape: 0
 
-  readonly property var modesFiltre: ["region", "lce", "emprise", "code"]
-  property string modeFiltre: "region"
+  // Les critères proposés, dans l'ordre où ils s'affichent. `ChoixCriteres`
+  // reprend cet ordre pour la sélection : le résumé du filtre se lit donc
+  // toujours de la même façon, quel que soit l'ordre des clics.
+  readonly property var criteresDisponibles: [
+    {
+      cle: "region",
+      libelle: qsTr("Région")
+    },
+    {
+      cle: "lce",
+      libelle: qsTr("N° de plan d'eau")
+    },
+    {
+      cle: "bassin",
+      libelle: qsTr("Nom du bassin")
+    },
+    {
+      cle: "emprise",
+      libelle: qsTr("Zone personnalisée")
+    },
+    {
+      cle: "code",
+      libelle: qsTr("Code d'UE")
+    }
+  ]
+
+  // Les critères cochés. La région seule est le point de départ courant.
+  property var criteresActifs: ["region"]
 
   property var unites: []
   property string messageErreur: ""
   property bool rechercheLancee: false
+
+  // Avancement de l'ouverture d'une unité (verrouillage, packaging).
+  property string messageOuverture: ""
 
   // Emprise personnalisée (voir SelecteurEmprise).
   property string empriseWkt: ""
@@ -54,17 +95,19 @@ IfaPopup {
   property int empriseNombreSommets: 0
   property var empriseSommets: []
 
+  // Tous les critères cochés doivent être renseignés : croiser un critère
+  // resserre la recherche, et un critère coché mais vide ne resserrerait rien
+  // — le technicien croirait avoir filtré sur quelque chose.
   readonly property bool filtrePret: {
-    if (modeFiltre === "region")
-      return comboRegion.currentIndex >= 0;
-    if (modeFiltre === "lce")
-      return champLce.text !== "";
-    if (modeFiltre === "code")
-      // Le serveur refuse en deçà : autant désactiver le bouton plutôt
-      // que de rapporter une erreur pour une saisie manifestement trop
-      // courte.
-      return champCode.text.trim().length >= 2;
-    return empriseWkt !== "";
+    if (criteresActifs.length === 0)
+      return false;
+
+    for (let i = 0; i < criteresActifs.length; ++i) {
+      if (!critereRenseigne(criteresActifs[i]))
+        return false;
+    }
+
+    return true;
   }
 
   // ===========================================================================
@@ -84,40 +127,66 @@ IfaPopup {
       Layout.columnSpan: grille.columns
       Layout.fillWidth: true
       Layout.bottomMargin: 4
-      text: qsTr("Sur quel critère rechercher les unités d'échantillonnage ?")
+      text: qsTr("Sur quels critères rechercher les unités d'échantillonnage ?")
       font: Theme.tipFont
       color: Theme.secondaryTextColor
       wrapMode: Text.WordWrap
     }
 
-    // ---- Choix du critère ------------------------------------------------------
+    // ---- Choix des critères ----------------------------------------------------
     Label {
       Layout.fillWidth: fenetre.compact
+      Layout.alignment: Qt.AlignTop
+      Layout.topMargin: fenetre.compact ? 0 : 8
       text: qsTr("Filtrer sur")
       font: Theme.strongTipFont
       color: Theme.secondaryTextColor
     }
 
-    QfToggleButtonGroup {
+    ChoixCriteres {
       id: choixFiltre
 
       Layout.fillWidth: true
-      // Le composant fixe sa `height` d'après son Flow interne ; sans cette
-      // hauteur minimale, le GridLayout l'écraserait à zéro.
-      Layout.minimumHeight: choixFiltre.height
+      // Un `Flow` calcule sa hauteur d'après sa largeur : sans l'annoncer au
+      // GridLayout, les pastilles repliées sur un second rang seraient
+      // coupées.
+      Layout.preferredHeight: choixFiltre.implicitHeight
+      Layout.minimumHeight: choixFiltre.implicitHeight
 
-      selectedIndex: 0
-      model: [qsTr("Région"), qsTr("N° de plan d'eau"), qsTr("Zone personnalisée"), qsTr("Code d'UE")]
+      accent: fenetre.accent
+      criteres: fenetre.criteresDisponibles
+      selection: fenetre.criteresActifs
 
-      onItemSelected: function (index, modelData) {
-        fenetre.modeFiltre = fenetre.modesFiltre[index];
+      onSelectionChangee: function (selection) {
+        fenetre.criteresActifs = selection;
+      }
+    }
+
+    // ---- Ce que le croisement fait ---------------------------------------------
+    //  Dit une fois, sous les pastilles, plutôt qu'à côté de chaque champ :
+    //  c'est la règle de lecture de tout le bloc.
+    Label {
+      Layout.columnSpan: grille.columns
+      Layout.fillWidth: true
+      Layout.bottomMargin: 4
+
+      font: Theme.tinyFont
+      color: Theme.secondaryTextColor
+      wrapMode: Text.WordWrap
+
+      text: {
+        if (fenetre.criteresActifs.length === 0)
+          return qsTr("Cochez au moins un critère.");
+        if (fenetre.criteresActifs.length === 1)
+          return qsTr("Cochez-en d'autres pour resserrer la recherche.");
+        return qsTr("Les %n critères se croisent : seules les unités qui les satisfont tous seront affichées.", "", fenetre.criteresActifs.length);
       }
     }
 
     // ---- Région ----------------------------------------------------------------
     Label {
       Layout.fillWidth: fenetre.compact
-      visible: fenetre.modeFiltre === "region"
+      visible: fenetre.estActif("region")
       text: qsTr("Région administrative")
       font: Theme.strongTipFont
       color: Theme.secondaryTextColor
@@ -127,7 +196,7 @@ IfaPopup {
       id: comboRegion
 
       Layout.fillWidth: true
-      visible: fenetre.modeFiltre === "region"
+      visible: fenetre.estActif("region")
 
       textRole: "nom"
       valueRole: "code"
@@ -138,7 +207,7 @@ IfaPopup {
     // ---- N° de plan d'eau --------------------------------------------------------
     Label {
       Layout.fillWidth: fenetre.compact
-      visible: fenetre.modeFiltre === "lce"
+      visible: fenetre.estActif("lce")
       text: qsTr("N° du plan d'eau (LCE)")
       font: Theme.strongTipFont
       color: Theme.secondaryTextColor
@@ -148,13 +217,49 @@ IfaPopup {
       id: champLce
 
       Layout.fillWidth: true
-      visible: fenetre.modeFiltre === "lce"
+      visible: fenetre.estActif("lce")
 
       maximumLength: 8
       placeholderText: qsTr("ex. 12777")
       inputMethodHints: Qt.ImhDigitsOnly
       validator: IntValidator {}
       onAccepted: fenetre.lancerRecherche()
+    }
+
+    // ---- Nom du bassin -------------------------------------------------------------
+    //  Le nom du bassin versant est porté par `infor_gener.ing_nom_bassi`, un
+    //  texte libre du fonds hérité : on y trouve « Saguenay » comme
+    //  « SAGUENAY (BASSIN) ». La recherche est donc partielle et insensible à
+    //  la casse, comme celle par code — exiger la graphie exacte réserverait le
+    //  critère à ceux qui connaissent déjà ce que la base contient.
+    Label {
+      Layout.fillWidth: fenetre.compact
+      visible: fenetre.estActif("bassin")
+      text: qsTr("Nom du bassin")
+      font: Theme.strongTipFont
+      color: Theme.secondaryTextColor
+    }
+
+    ColumnLayout {
+      Layout.fillWidth: true
+      visible: fenetre.estActif("bassin")
+      spacing: 2
+
+      TextField {
+        id: champBassin
+
+        Layout.fillWidth: true
+        placeholderText: qsTr("ex. Saguenay, Outaouais…")
+        onAccepted: fenetre.lancerRecherche()
+      }
+
+      Label {
+        Layout.fillWidth: true
+        text: qsTr("Recherche partielle : tout fragment du nom convient, majuscules ou non. Deux caractères minimum.")
+        font: Theme.tinyFont
+        color: Theme.secondaryTextColor
+        wrapMode: Text.WordWrap
+      }
     }
 
     // ---- Code d'UE ---------------------------------------------------------------
@@ -164,7 +269,7 @@ IfaPopup {
     //  laisserait croire qu'elles comptent. Le serveur ignore la casse.
     Label {
       Layout.fillWidth: fenetre.compact
-      visible: fenetre.modeFiltre === "code"
+      visible: fenetre.estActif("code")
       text: qsTr("Code de l'unité")
       font: Theme.strongTipFont
       color: Theme.secondaryTextColor
@@ -172,7 +277,7 @@ IfaPopup {
 
     ColumnLayout {
       Layout.fillWidth: true
-      visible: fenetre.modeFiltre === "code"
+      visible: fenetre.estActif("code")
       spacing: 2
 
       TextField {
@@ -199,7 +304,7 @@ IfaPopup {
       Layout.fillWidth: true
       Layout.preferredHeight: blocEmprise.implicitHeight + 24
 
-      visible: fenetre.modeFiltre === "emprise"
+      visible: fenetre.estActif("emprise")
 
       radius: 12
       color: Theme.controlBackgroundAlternateColor
@@ -408,11 +513,21 @@ IfaPopup {
       lignes: fenetre.unites
       accent: fenetre.accent
 
+      // C'est lui qui décide si le cadenas d'une unité tenue s'ouvre ou reste
+      // fermé : seul son détenteur peut lever un verrou.
+      utilisateur: fenetre.session ? fenetre.session.utilisateur : ""
+
+      uniteEnCours: ouverture.enCours ? ouverture.uniteCourante : ""
+      uniteDeverrouillage: verrouillage.enCours ? verrouillage.uniteCourante : ""
+
       onOuvrirVerrouille: function (unite) {
         fenetre.ouvrirUnite(unite, true);
       }
       onOuvrirLecture: function (unite) {
         fenetre.ouvrirUnite(unite, false);
+      }
+      onDeverrouiller: function (unite) {
+        fenetre.demanderDeverrouillage(unite);
       }
       onSupprimer: function (unite) {
         fenetre.demanderSuppression(unite);
@@ -506,6 +621,88 @@ IfaPopup {
     }
   }
 
+  // Ouverture d'une unité dans QField : verrouillage, préparation du projet
+  // d'affichage, attente du packaging. Voir `ServiceOuverture.qml`.
+  ServiceOuverture {
+    id: ouverture
+
+    session: fenetre.session
+
+    onProgression: function (message) {
+      fenetre.messageOuverture = message;
+    }
+
+    onPret: function (infos) {
+      fenetre.messageOuverture = "";
+      fenetre.appliquerVerrou(infos["verrou"]);
+      avertir(qsTr("Unité %1 prête dans le projet %2.").arg(infos["unite"]).arg(infos["projet_nom"]), "success");
+    }
+
+    onOuvertureManuelle: function (nomProjet) {
+      // Le projet est prêt sur le serveur ; seule son ouverture automatique a
+      // échoué. Le nom du projet devient alors la seule prise du technicien
+      // pour retrouver son travail : un dialogue, pas un toast — voir
+      // l'en-tête de `DialogueProjetPret`.
+      fenetre.messageOuverture = "";
+
+      const code = ouverture.uniteCourante;
+      dialogueProjet.annoncer(nomProjet, code !== "" ? qsTr("L'unité %1 est prête.").arg(code) : "");
+    }
+
+    onEchec: function (message) {
+      fenetre.messageOuverture = "";
+      fenetre.messageErreur = message;
+      avertir(message, "warning");
+    }
+  }
+
+  // Levée du verrou, à la demande de son détenteur. Voir `ServiceVerrou.qml`.
+  ServiceVerrou {
+    id: verrouillage
+
+    session: fenetre.session
+
+    onDeverrouille: function (verrou, change) {
+      fenetre.appliquerVerrou(verrou);
+
+      // `change` est faux quand l'unité n'était déjà plus verrouillée — un
+      // collègue l'a rendue entre-temps, ou une préparation qui avait échoué
+      // a relâché son verrou. Ce n'est pas une erreur : le résultat voulu est
+      // là. Mais le dire évite au technicien de croire que son geste a porté.
+      if (change)
+        avertir(qsTr("Unité %1 déverrouillée — elle est de nouveau disponible.").arg(verrou["une_code_ident"]), "success");
+      else
+        avertir(qsTr("L'unité %1 n'était déjà plus verrouillée.").arg(verrou["une_code_ident"]), "info");
+    }
+
+    onEchec: function (message) {
+      fenetre.messageErreur = message;
+      avertir(message, "warning");
+    }
+  }
+
+  // Le motif du verrouillage est demandé avant l'envoi : c'est lui que liront
+  // les autres équipes si elles tentent d'ouvrir la même unité.
+  DialogueRaisonVerrou {
+    id: dialogueRaison
+
+    zoneParente: fenetre.zoneUtile
+
+    onValide: function (raison) {
+      ouverture.ouvrir(dialogueRaison.unite, "modifiable", raison);
+    }
+  }
+
+  // Le projet préparé est à ouvrir à la main depuis l'écran « Projets » de
+  // QField. Le dialogue reste à l'écran tant que le technicien ne l'a pas
+  // refermé : il porte le nom du projet, et rien d'autre ne le donne.
+  DialogueProjetPret {
+    id: dialogueProjet
+
+    zoneParente: fenetre.zoneUtile
+    accent: fenetre.accent
+  }
+
   // ===========================================================================
   //  Tracé de la zone personnalisée
   // ===========================================================================
@@ -525,6 +722,90 @@ IfaPopup {
     onAnnule: fenetre.open()
 
     Component.onDestruction: selecteurEmprise.reinitialiserAffichage()
+  }
+
+  // ===========================================================================
+  //  Confirmation du déverrouillage
+  // ===========================================================================
+  //  Rendre une unité n'est pas rattrapable d'un clic : une autre équipe peut
+  //  la prendre dans la minute, et il faudra alors attendre qu'elle la rende.
+  //  D'où une confirmation, qui nomme l'unité — le tableau est dense et les
+  //  lignes se ressemblent.
+  Popup {
+    id: confirmationDeverrouillage
+
+    property var unite: null
+
+    parent: fenetre.zoneUtile
+    width: Math.min(parent ? parent.width - 40 : 320, 400)
+    x: parent ? (parent.width - width) / 2 : 0
+    y: parent ? (parent.height - height) / 2 : 0
+
+    modal: true
+    focus: true
+    padding: 0
+    closePolicy: Popup.CloseOnEscape
+
+    background: Rectangle {
+      color: Theme.mainBackgroundColor
+      radius: 14
+      border.width: 1
+      border.color: Theme.controlBorderColor
+    }
+
+    contentItem: ColumnLayout {
+      spacing: 14
+
+      Label {
+        Layout.fillWidth: true
+        Layout.topMargin: 18
+        Layout.leftMargin: 18
+        Layout.rightMargin: 18
+        text: qsTr("Déverrouiller cette unité ?")
+        font: Theme.strongFont
+        color: Theme.mainTextColor
+        wrapMode: Text.WordWrap
+      }
+
+      Label {
+        Layout.fillWidth: true
+        Layout.leftMargin: 18
+        Layout.rightMargin: 18
+        text: confirmationDeverrouillage.unite ? qsTr("L'unité %1 redeviendra disponible pour les autres équipes. Synchronisez vos modifications avant de la rendre : une fois reprise par quelqu'un d'autre, vous ne pourrez plus la verrouiller.").arg(confirmationDeverrouillage.unite["une_code_ident"]) : ""
+        font: Theme.tipFont
+        color: Theme.secondaryTextColor
+        wrapMode: Text.WordWrap
+      }
+
+      RowLayout {
+        Layout.fillWidth: true
+        Layout.bottomMargin: 14
+        Layout.leftMargin: 12
+        Layout.rightMargin: 12
+        spacing: 8
+
+        Item {
+          Layout.fillWidth: true
+        }
+
+        QfButton {
+          text: qsTr("Annuler")
+          bgcolor: "transparent"
+          color: Theme.secondaryTextColor
+          onClicked: confirmationDeverrouillage.close()
+        }
+
+        QfButton {
+          text: qsTr("Déverrouiller")
+          bgcolor: Theme.warningColor
+          color: "#ffffff"
+          onClicked: {
+            fenetre.deverrouillerUnite(confirmationDeverrouillage.unite);
+            confirmationDeverrouillage.close();
+          }
+        }
+      }
+    }
   }
 
   // ===========================================================================
@@ -625,20 +906,56 @@ IfaPopup {
     service.rechercher(filtreCourant());
   }
 
+  function estActif(mode) {
+    return criteresActifs.indexOf(mode) !== -1;
+  }
+
+  // Un critère coché est-il utilisable ? Les bornes reprennent celles du
+  // serveur : mieux vaut un bouton « Rechercher » éteint qu'un aller-retour
+  // qui revient en erreur pour une saisie manifestement trop courte.
+  function critereRenseigne(mode) {
+    if (mode === "region")
+      return comboRegion.currentIndex >= 0;
+    if (mode === "lce")
+      return champLce.text !== "";
+    if (mode === "bassin")
+      return champBassin.text.trim().length >= 2;
+    if (mode === "code")
+      return champCode.text.trim().length >= 2;
+    return empriseWkt !== "";
+  }
+
+  // Les critères cochés, dans la forme attendue par `ServiceUE`.
   function filtreCourant() {
-    if (modeFiltre === "region")
+    const liste = [];
+
+    for (let i = 0; i < criteresActifs.length; ++i) {
+      liste.push(critereCourant(criteresActifs[i]));
+    }
+
+    return liste;
+  }
+
+  function critereCourant(mode) {
+    if (mode === "region")
       return {
         "mode": "region",
         "valeur": comboRegion.currentValue
       };
 
-    if (modeFiltre === "lce")
+    if (mode === "lce")
       return {
         "mode": "lce",
         "valeur": champLce.text
       };
 
-    if (modeFiltre === "code")
+    if (mode === "bassin")
+      return {
+        "mode": "bassin",
+        "valeur": champBassin.text.trim()
+      };
+
+    if (mode === "code")
       return {
         "mode": "code",
         "valeur": champCode.text.trim()
@@ -651,12 +968,30 @@ IfaPopup {
     };
   }
 
+  // Le rappel affiché au-dessus des résultats. Les critères sont joints par
+  // « et » : c'est bien une conjonction, et la phrase doit dire au technicien
+  // pourquoi sa liste est courte.
   function resumeFiltre() {
-    if (modeFiltre === "region")
+    const morceaux = [];
+
+    for (let i = 0; i < criteresActifs.length; ++i) {
+      morceaux.push(resumeCritere(criteresActifs[i]));
+    }
+
+    if (morceaux.length === 0)
+      return qsTr("Aucun critère");
+
+    return morceaux.join(qsTr(" et "));
+  }
+
+  function resumeCritere(mode) {
+    if (mode === "region")
       return qsTr("Région : %1").arg(comboRegion.currentIndex >= 0 ? comboRegion.currentText : "—");
-    if (modeFiltre === "lce")
+    if (mode === "lce")
       return qsTr("Plan d'eau n° %1").arg(champLce.text);
-    if (modeFiltre === "code")
+    if (mode === "bassin")
+      return qsTr("Bassin contenant « %1 »").arg(champBassin.text.trim());
+    if (mode === "code")
       return qsTr("Code contenant « %1 »").arg(champCode.text.trim());
     return qsTr("Zone personnalisée — %n sommet(s)", "", empriseNombreSommets);
   }
@@ -679,26 +1014,93 @@ IfaPopup {
   }
 
   // ---- Actions sur une unité -------------------------------------------------------
-  // La recherche est branchée sur le serveur ; les trois actions ne le sont
-  // pas encore. Points d'accès à ajouter dans `qfieldcloud.ifa` :
-  //   * verrouiller  → POST /api/v1/ifa/unites/<code>/verrou/ puis ouverture
-  //                    du formulaire « mesurage » en écriture ;
-  //   * consulter    → ouverture du même formulaire en lecture seule ;
-  //   * supprimer    → DELETE /api/v1/ifa/unites/<code>/.
+  // Les deux ouvertures passent par `POST /api/v1/ifa/unites/<code>/ouvrir/`
+  // (voir `ServiceOuverture.qml`). La suppression, elle, n'a toujours pas de
+  // point d'accès : `DELETE /api/v1/ifa/unites/<code>/` reste à écrire.
   //
   // Le verrou renvoyé par la recherche (`une_ind_verro`, `une_nom_propr_verro`)
   // est déjà celui de la base : le tableau désactive correctement les actions
   // sur une unité tenue par quelqu'un d'autre.
   function ouvrirUnite(unite, avecVerrou) {
+    if (!unite)
+      return;
+
+    if (ouverture.enCours) {
+      avertir(qsTr("Ouverture de l'unité %1 en cours — patientez.").arg(ouverture.uniteCourante), "info");
+      return;
+    }
+
+    messageErreur = "";
     referentiels.definirVariableProjet("une_code_ident", unite["une_code_ident"]);
 
     if (avecVerrou) {
-      avertir(qsTr("Ouverture verrouillée de %1 — service non déployé.").arg(unite["une_code_ident"]), "info");
-    } else {
-      avertir(qsTr("Ouverture en consultation de %1 — service non déployé.").arg(unite["une_code_ident"]), "info");
+      // Le verrouillage attend la raison ; c'est le dialogue qui enchaîne.
+      dialogueRaison.demander(unite);
+      return;
     }
 
-    iface.logMessage("[IFA] ouvrir " + unite["une_code_ident"] + (avecVerrou ? " (avec verrou)" : " (lecture seule)"));
+    // `ouverture.ouvrir()` remplit le bandeau dès son premier appel, mais la
+    // fenêtre peut être défilée loin de lui : le toast donne le retour au
+    // doigt, tout de suite. Le mode verrouillé, lui, a déjà son dialogue.
+    avertir(qsTr("Préparation de l'unité %1…").arg(unite["une_code_ident"]), "info");
+
+    ouverture.ouvrir(unite, "consultation", "");
+  }
+
+  // Remplace l'état de verrou d'une unité par celui que le serveur vient de
+  // renvoyer, sans relancer la recherche : la ligne du tableau et son étiquette
+  // de verrou se mettent à jour seules.
+  function appliquerVerrou(verrou) {
+    if (!verrou || !verrou["une_code_ident"])
+      return;
+
+    const misesAJour = [];
+
+    for (let i = 0; i < unites.length; ++i) {
+      const ligne = unites[i];
+
+      if (ligne["une_code_ident"] !== verrou["une_code_ident"]) {
+        misesAJour.push(ligne);
+        continue;
+      }
+
+      const copie = {};
+      for (const cle in ligne) {
+        copie[cle] = ligne[cle];
+      }
+      for (const champ in verrou) {
+        copie[champ] = verrou[champ];
+      }
+      misesAJour.push(copie);
+    }
+
+    unites = misesAJour;
+  }
+
+  // ---- Déverrouillage ---------------------------------------------------------------
+  //  Le bouton n'apparaît que sur les unités que l'utilisateur tient lui-même
+  //  (`TableauUE.estMoi()`), mais la liste peut avoir vieilli : un collègue a
+  //  pu reprendre l'unité depuis la recherche. C'est le serveur qui tranche, et
+  //  son refus nomme le nouveau détenteur.
+  function demanderDeverrouillage(unite) {
+    if (!unite)
+      return;
+
+    if (ouverture.enCours || verrouillage.enCours) {
+      avertir(qsTr("Un traitement est déjà en cours — patientez."), "info");
+      return;
+    }
+
+    confirmationDeverrouillage.unite = unite;
+    confirmationDeverrouillage.open();
+  }
+
+  function deverrouillerUnite(unite) {
+    if (!unite)
+      return;
+
+    messageErreur = "";
+    verrouillage.deverrouiller(unite);
   }
 
   function demanderSuppression(unite) {

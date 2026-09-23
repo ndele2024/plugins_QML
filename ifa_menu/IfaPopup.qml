@@ -57,11 +57,23 @@ Popup {
   // Les fenêtres qui n'interrogent pas le serveur l'ignorent simplement.
   property var session: null
 
+  // Suivi de la validation du projet ouvert, injecté par main.qml
+  // (ServiceValidation.qml). Il vit hors des fenêtres — il doit guetter les
+  // synchronisations même quand aucune n'est ouverte — et n'intéresse que
+  // « Validation », mais il s'injecte comme les autres.
+  property var validation: null
+
   // Contenu principal de la fenêtre.
   default property alias contenu: colonne.data
 
   // Boutons du pied de page. Le pied reste masqué tant qu'il est vide.
   property alias actions: pied.data
+
+  // Opération longue en cours : le texte à afficher, ou "" pour ne rien
+  // afficher. Le bandeau correspondant est **hors de la zone défilante** : une
+  // attente signalée au milieu d'une liste de résultats disparaît dès que le
+  // technicien descend pour cliquer, et la fenêtre paraît alors inerte.
+  property string activite: ""
 
   // Marge intérieure de la zone de contenu.
   property real margeContenu: 16
@@ -226,6 +238,52 @@ Popup {
           iconSource: Theme.getThemeVectorIcon("ic_close_white_24dp")
           iconColor: fenetre.surAccent
           onClicked: fenetre.close()
+        }
+      }
+    }
+
+    // ---- Activité en cours ---------------------------------------------------
+    //  Épinglé sous l'en-tête : il reste visible quel que soit le défilement.
+    Rectangle {
+      id: bandeauActivite
+
+      Layout.fillWidth: true
+      Layout.preferredHeight: visible ? Math.max(texteActivite.implicitHeight, 22) + 20 : 0
+
+      visible: fenetre.activite !== ""
+
+      color: Qt.rgba(fenetre.accent.r, fenetre.accent.g, fenetre.accent.b, 0.14)
+
+      Rectangle {
+        anchors.bottom: parent.bottom
+        anchors.left: parent.left
+        anchors.right: parent.right
+        height: 1
+        color: Qt.rgba(fenetre.accent.r, fenetre.accent.g, fenetre.accent.b, 0.45)
+      }
+
+      RowLayout {
+        anchors.fill: parent
+        anchors.leftMargin: 16
+        anchors.rightMargin: 16
+        spacing: 12
+
+        BusyIndicator {
+          Layout.preferredWidth: 22
+          Layout.preferredHeight: 22
+          Layout.alignment: Qt.AlignVCenter
+          running: bandeauActivite.visible
+        }
+
+        Label {
+          id: texteActivite
+
+          Layout.fillWidth: true
+          Layout.alignment: Qt.AlignVCenter
+          text: fenetre.activite
+          font: Theme.tipFont
+          color: Theme.mainTextColor
+          wrapMode: Text.WordWrap
         }
       }
     }

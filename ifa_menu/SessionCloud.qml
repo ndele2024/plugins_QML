@@ -92,6 +92,14 @@ Item {
 
   readonly property bool disponible: urlServeur !== "" && utilisateur !== ""
 
+  // Vrai si un appel peut partir **sans rien demander à l'utilisateur** : le
+  // jeton est là, ou QField détient le mot de passe. Les appels déclenchés par
+  // un geste (un bouton, une validation de formulaire) n'ont pas à s'en
+  // soucier — la demande de mot de passe est alors attendue. Ceux qui partent
+  // d'eux-mêmes, si : réclamer un mot de passe au démarrage de QField, pour un
+  // rapport que personne n'a demandé, serait déplacé.
+  readonly property bool jetonDisponible: jeton !== "" || proprieteCloud("password") !== ""
+
   // Appels reçus avant d'avoir un jeton. Vidée dès qu'il arrive.
   property var fileAttente: []
 
@@ -106,13 +114,16 @@ Item {
   // ===========================================================================
   //  `corps`     objet sérialisé en JSON ; `null` pour un GET.
   //  `onSucces`  reçoit la réponse déjà décodée.
-  //  `onEchec`   reçoit un texte affichable tel quel.
+  //  `onEchec`   reçoit un texte affichable tel quel, puis le code HTTP —
+  //              `0` quand la requête n'a pas abouti (réseau, délai dépassé).
+  //              Le second argument ne sert qu'à qui doit distinguer un cas de
+  //              figure d'une panne ; les autres l'ignorent.
   function appeler(methode, chemin, corps, onSucces, onEchec) {
     if (!connexionCloud)
       connexionCloud = resoudreConnexion();
 
     if (!disponible) {
-      onEchec(qsTr("Aucune connexion QFieldCloud active. Se connecter au serveur depuis QField, puis réessayer."));
+      onEchec(qsTr("Aucune connexion QFieldCloud active. Se connecter au serveur depuis QField, puis réessayer."), 0);
       return;
     }
 
@@ -202,7 +213,7 @@ Item {
     const file = fileAttente;
     fileAttente = [];
     for (let i = 0; i < file.length; ++i) {
-      file[i].onEchec(message);
+      file[i].onEchec(message, 0);
     }
   }
 
@@ -223,7 +234,7 @@ Item {
       termine = true;
       minuterie.destroy();
       xhr.abort();
-      requete.onEchec(qsTr("Le serveur n'a pas répondu dans le délai imparti."));
+      requete.onEchec(qsTr("Le serveur n'a pas répondu dans le délai imparti."), 0);
     });
 
     xhr.onreadystatechange = function () {
@@ -246,7 +257,7 @@ Item {
       termine = true;
       minuterie.stop();
       minuterie.destroy();
-      requete.onEchec(qsTr("Impossible de joindre le serveur : %1").arg(e));
+      requete.onEchec(qsTr("Impossible de joindre le serveur : %1").arg(e), 0);
     }
   }
 
@@ -263,7 +274,7 @@ Item {
     }
 
     if (xhr.status === 0) {
-      requete.onEchec(qsTr("Serveur injoignable. Vérifier la connexion réseau."));
+      requete.onEchec(qsTr("Serveur injoignable. Vérifier la connexion réseau."), 0);
       return;
     }
 
@@ -283,7 +294,13 @@ Item {
 
     // QFieldCloud rend ses erreurs sous la forme { code, message }.
     const message = donnees && donnees.message ? donnees.message : qsTr("Le serveur a répondu par une erreur (HTTP %1).").arg(xhr.status);
-    requete.onEchec(message);
+
+    // Le statut est passé en second argument, pour les appelants qui ont
+    // besoin de distinguer un cas de figure d'une panne — un rapport de
+    // validation pas encore produit répond 404, et ce n'est pas une erreur à
+    // afficher. Les autres l'ignorent : une fonction JavaScript ne s'offusque
+    // pas d'un argument de plus.
+    requete.onEchec(message, xhr.status);
   }
 
   // ===========================================================================
@@ -312,6 +329,14 @@ Item {
     }
 
     if (!dialogueMotDePasse.visible) {
+      if (!dialogueMotDePasse.resoudreZoneParente()) {
+        // Sans zone où s'afficher, `open()` ne ferait rien : les appels
+        // resteraient en file, sans que rien ne le dise.
+        iface.logMessage("[IFA] fenetre principale introuvable : mot de passe non demande");
+        abandonnerFile(qsTr("Authentification impossible pour le moment. Réessayer."));
+        return;
+      }
+
       dialogueMotDePasse.messageErreur = "";
       dialogueMotDePasse.open();
     }
@@ -409,7 +434,29 @@ Item {
 
     property string messageErreur: ""
 
-    parent: iface.mainWindow() ? iface.mainWindow().contentItem : null
+    // Même piège que pour `IfaPopup` et `DialogueDeverrouillage` : cette
+    // session est construite au chargement du plugin, avant que la fenêtre
+    // principale n'existe. `iface.mainWindow()` n'étant pas une propriété, une
+    // liaison évaluée à ce moment-là resterait nulle pour toujours, et le
+    // dialogue ne s'afficherait jamais — sans erreur. D'où la zone gardée dans
+    // une propriété, et résolue de nouveau avant chaque ouverture.
+    property Item zoneParente: iface.mainWindow() ? iface.mainWindow().contentItem : null
+
+    function resoudreZoneParente() {
+      if (zoneParente)
+        return true;
+
+      const principale = iface.mainWindow();
+
+      if (principale)
+        zoneParente = principale.contentItem;
+
+      return zoneParente !== null;
+    }
+
+    onAboutToShow: resoudreZoneParente()
+
+    parent: zoneParente
     width: Math.min(parent ? parent.width - 40 : 320, 420)
     x: parent ? (parent.width - width) / 2 : 0
     y: parent ? (parent.height - height) / 2 : 0

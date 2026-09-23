@@ -33,7 +33,6 @@ Options communes :
 from __future__ import annotations
 
 import argparse
-import os
 import platform
 import shutil
 import sys
@@ -84,16 +83,34 @@ def detecter_nom_projet(dossier_projet: Path) -> str | None:
 
 
 def installer_plugin_application(destination_racine: Path, nom: str) -> Path:
-    """Copie le plugin dans <destination_racine>/<nom>/."""
+    """Copie le plugin dans <destination_racine>/<nom>/, sans vider le dossier.
+
+    Le dossier d'installation n'est jamais supprimé. Un `shutil.rmtree` y était
+    tentant — il garantit de partir propre — mais sous OneDrive, ou simplement
+    avec QField ouvert, la suppression du dossier lui-même échoue *après* celle
+    de son contenu : le plugin se retrouve désinstallé et rien n'est recopié.
+    L'erreur arrive donc au pire moment, quand il n'y a plus rien à quoi
+    revenir.
+
+    On écrase fichier par fichier, puis on retire les seuls fichiers du plugin
+    que la source ne fournit plus. Une copie qui échoue laisse le fichier
+    précédent en place, et le script le dit au lieu de faire semblant.
+    """
     destination = destination_racine / nom
+    destination.mkdir(parents=True, exist_ok=True)
 
-    if destination.exists():
-        shutil.rmtree(destination)
-    destination.mkdir(parents=True)
+    sources = fichiers_du_plugin()
+    echecs = _copier(sources, destination)
+    _retirer_les_restes(destination, {fichier.name for fichier in sources})
 
-    for fichier in fichiers_du_plugin():
-        shutil.copy2(fichier, destination / fichier.name)
-        print(f"  {fichier.name}")
+    if echecs:
+        print(f"\n{len(echecs)} fichier(s) n'ont pas pu être remplacés :")
+        for echec in echecs:
+            print(f"  {echec}")
+        sys.exit(
+            "\nL'installation est incomplète. Fermez QField (et laissez la "
+            "synchronisation OneDrive se terminer), puis relancez."
+        )
 
     print(f"\nPlugin installé dans : {destination}")
     print(
@@ -101,6 +118,46 @@ def installer_plugin_application(destination_racine: Path, nom: str) -> Path:
         "et son bouton « démarrer » dans la barre d'outils."
     )
     return destination
+
+
+def _copier(fichiers: list[Path], destination: Path) -> list[str]:
+    """Copie les fichiers dans `destination`, en écrasant. Rend les échecs."""
+    echecs: list[str] = []
+
+    for fichier in fichiers:
+        try:
+            shutil.copy2(fichier, destination / fichier.name)
+        except OSError as erreur:
+            echecs.append(f"{fichier.name} : {erreur.strerror or erreur}")
+            print(f"  {fichier.name}  ÉCHEC")
+        else:
+            print(f"  {fichier.name}")
+
+    return echecs
+
+
+def _retirer_les_restes(destination: Path, attendus: set[str]) -> None:
+    """Supprime les fichiers du plugin que la source ne fournit plus.
+
+    Sans cela, un composant renommé laisserait son ancien `.qml` dans le
+    dossier, où l'import implicite de répertoire de QML continuerait de le
+    résoudre. Seuls les fichiers portant les extensions du plugin sont
+    concernés : ce dossier n'est pas le nôtre, et rien ne dit qu'il ne contient
+    que ce qu'on y a mis.
+    """
+    for reste in sorted(destination.iterdir()):
+        if not reste.is_file() or reste.suffix.lower() not in EXTENSIONS:
+            continue
+
+        if reste.name in attendus:
+            continue
+
+        try:
+            reste.unlink()
+        except OSError as erreur:
+            print(f"  {reste.name}  non supprimé ({erreur.strerror or erreur})")
+        else:
+            print(f"  {reste.name}  retiré (absent de la source)")
 
 
 def installer_plugin_projet(dossier_projet: Path) -> Path:

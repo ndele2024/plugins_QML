@@ -7,9 +7,34 @@
 //    région administrative → projet → type d'UE → n° de plan d'eau (LCE)
 //    → identifiant UE (composé automatiquement, modifiable à la main)
 //
-//  À la validation, les valeurs sont posées comme variables de projet (elles
-//  alimentent les valeurs par défaut du formulaire QGIS), puis le formulaire
-//  de saisie de la couche « mesurage » est ouvert.
+//  ---------------------------------------------------------------------------
+//  CE QUE FAIT « CRÉER »
+//  ---------------------------------------------------------------------------
+//  La saisie ne se fait plus dans le projet ouvert, mais dans un projet dédié
+//  que le serveur prépare : `formulaire_UE_IFA`, sous le compte de
+//  l'utilisateur. Un appui sur « Créer » enchaîne donc, par
+//  `ServiceFormulaire` :
+//
+//    1. l'unité est **inscrite dans `ifa_data.unite_echan` et verrouillée** au
+//       nom de l'utilisateur, raison « nouvelle Unité d'échantillonnage » :
+//       son code est réservé avant que quiconque parte sur le terrain ;
+//    2. le serveur retrouve — ou crée à partir du projet modèle — le projet
+//       `formulaire_UE_IFA` de l'utilisateur ;
+//    3. il remplit son GeoPackage des données choisies dans « Données à
+//       embarquer », lues dans le schéma `ifa_data`, la nouvelle unité
+//       comprise ;
+//    4. le téléchargement est demandé à QField, et la fenêtre nomme le projet
+//       à ouvrir depuis l'écran « Projets ».
+//
+//  Le projet ouvert n'est ni fermé ni remplacé : le dernier geste appartient au
+//  technicien. Fermer la carte et ouvrir le nouveau projet par
+//  `iface.clearProject()` / `iface.loadFile()` a été essayé sur l'appareil, sans
+//  succès — voir `ServiceFormulaire.qml`.
+//
+//  Les valeurs saisies ici ne sont donc plus posées sur le projet ouvert : ce
+//  n'est pas lui qui recevra la saisie. Elles partent avec la demande et le
+//  serveur les inscrit comme **variables du projet livré**, où elles
+//  alimentent les valeurs par défaut du formulaire QGIS.
 //
 //  Différences avec le plugin d'origine :
 //    * tous les accès aux couches passent par Referentiels et sont défensifs :
@@ -24,7 +49,6 @@ import QtQuick.Controls.impl
 import QtQuick.Layouts
 
 import org.qfield
-import org.qgis
 import Theme
 
 IfaPopup {
@@ -45,14 +69,42 @@ IfaPopup {
   // Dernier résultat de recherche LCE ({ coucheDisponible, trouve, nom, mrc }).
   property var resultatLce: null
 
-  readonly property var coucheMesurage: referentiels ? referentiels.couche("mesurage") : null
 
   // ---- Filtre des données à embarquer ---------------------------------------
   // Détermine le sous-ensemble de données extrait dans les GeoPackage du projet
-  // dérivé. Les trois modes reprennent ceux de `extract_ipe_subset.py`, avec le
-  // n° de plan d'eau en plus.
-  readonly property var modesFiltre: ["region", "lce", "emprise"]
-  property string modeFiltre: "region"
+  // dérivé. Les modes reprennent ceux de `extract_ipe_subset.py`, avec le n° de
+  // plan d'eau et le nom de bassin en plus.
+  //
+  // Les critères cochés se **croisent** : une unité doit les satisfaire tous
+  // pour être embarquée. C'est ce qui rend la région utilisable. Douze des
+  // dix-huit régions portent plus de 2 000 unités — jusqu'à 57 676 pour la
+  // région 01 — et le serveur refuse alors la demande, un GeoPackage de cette
+  // taille n'étant pas téléchargeable sur le terrain. Croisée avec un bassin ou
+  // une emprise, la même région redevient embarquable.
+  //
+  // Le n° de plan d'eau reste coché par défaut : c'est le critère qui aboutit à
+  // coup sûr, et c'est le geste courant — le n° LCE vient d'être saisi
+  // au-dessus.
+  readonly property var criteresDisponibles: [
+    {
+      cle: "region",
+      libelle: qsTr("Région")
+    },
+    {
+      cle: "lce",
+      libelle: qsTr("N° de plan d'eau")
+    },
+    {
+      cle: "bassin",
+      libelle: qsTr("Nom du bassin")
+    },
+    {
+      cle: "emprise",
+      libelle: qsTr("Emprise personnalisée")
+    }
+  ]
+
+  property var criteresActifs: ["lce"]
 
   // Emprise personnalisée, renseignée par SelecteurEmprise.
   property string empriseWkt: ""
@@ -62,15 +114,27 @@ IfaPopup {
   // Sommets en CRS carte, conservés pour pouvoir reprendre un tracé existant.
   property var empriseSommets: []
 
+  // Tous les critères cochés doivent être renseignés : un critère coché mais
+  // vide ne restreindrait rien, alors que le technicien croirait l'avoir posé.
   readonly property bool filtrePret: {
-    if (modeFiltre === "region")
-      return comboRegion.currentIndex >= 0;
-    if (modeFiltre === "lce")
-      return champLce.text !== "";
-    return empriseWkt !== "";
+    if (criteresActifs.length === 0)
+      return false;
+
+    for (let i = 0; i < criteresActifs.length; ++i) {
+      if (!critereRenseigne(criteresActifs[i]))
+        return false;
+    }
+
+    return true;
   }
 
   readonly property bool saisieComplete: comboRegion.currentIndex >= 0 && comboType.currentIndex >= 0 && champIdentifiant.text.trim() !== "" && champIdentifiant.text.indexOf("[") === -1 && filtrePret
+
+  // La session est facultative dans IfaPopup ; ici, elle est la condition de
+  // tout ce que fait le bouton « Créer ».
+  readonly property bool serveurJoignable: session !== null && session.disponible
+
+  readonly property bool preparationEnCours: formulaire.enCours
 
   onOpened: {
     if (!referentiels)
@@ -94,14 +158,17 @@ IfaPopup {
     columnSpacing: 16
     rowSpacing: fenetre.compact ? 4 : 10
 
-    // ---- Avertissement : projet incomplet ------------------------------------
+    // ---- Avertissement : serveur injoignable ---------------------------------
+    //  La saisie a lieu dans un projet que le serveur prépare : sans session
+    //  QFieldCloud, « Créer » n'a rien à quoi s'adresser. Le formulaire reste
+    //  affiché — le technicien peut se connecter puis revenir.
     Rectangle {
       Layout.columnSpan: grille.columns
       Layout.fillWidth: true
       Layout.preferredHeight: texteAvertissement.implicitHeight + 20
       Layout.bottomMargin: 6
 
-      visible: fenetre.coucheMesurage === null
+      visible: !fenetre.serveurJoignable
 
       radius: 10
       color: Qt.rgba(Theme.warningColor.r, Theme.warningColor.g, Theme.warningColor.b, 0.14)
@@ -128,7 +195,7 @@ IfaPopup {
           id: texteAvertissement
           Layout.fillWidth: true
           Layout.alignment: Qt.AlignVCenter
-          text: qsTr("La couche « mesurage » est absente du projet ouvert : la saisie ne pourra pas être lancée.")
+          text: qsTr("Aucune connexion QFieldCloud active : le projet de saisie ne peut pas être préparé. Connectez-vous au serveur depuis QField.")
           font: Theme.tinyFont
           color: Theme.mainTextColor
           wrapMode: Text.WordWrap
@@ -358,28 +425,36 @@ IfaPopup {
     // ---- Choix du critère de filtrage ------------------------------------------
     Label {
       Layout.fillWidth: fenetre.compact
+      Layout.alignment: Qt.AlignTop
+      Layout.topMargin: fenetre.compact ? 0 : 8
       text: qsTr("Filtrer sur")
       font: Theme.strongTipFont
       color: Theme.secondaryTextColor
     }
 
-    QfToggleButtonGroup {
+    ChoixCriteres {
       id: choixFiltre
 
       Layout.fillWidth: true
-      // Le composant fixe sa `height` d'après son Flow interne ; sans cette
-      // hauteur minimale, le GridLayout l'écraserait à zéro.
-      Layout.minimumHeight: choixFiltre.height
+      // Un `Flow` calcule sa hauteur d'après sa largeur : sans l'annoncer au
+      // GridLayout, les pastilles repliées sur un second rang seraient
+      // coupées.
+      Layout.preferredHeight: choixFiltre.implicitHeight
+      Layout.minimumHeight: choixFiltre.implicitHeight
 
-      selectedIndex: 0
-      model: [qsTr("Région"), qsTr("N° de plan d'eau"), qsTr("Emprise personnalisée")]
+      accent: fenetre.accent
+      criteres: fenetre.criteresDisponibles
+      selection: fenetre.criteresActifs
 
-      onItemSelected: function (index, modelData) {
-        fenetre.modeFiltre = fenetre.modesFiltre[index];
+      onSelectionChangee: function (selection) {
+        fenetre.criteresActifs = selection;
       }
     }
 
-    // ---- Explication du critère retenu -----------------------------------------
+    // ---- Ce que les critères retenus embarquent --------------------------------
+    //  La phrase dit ce qui partira dans le GeoPackage, et nomme ce qui manque
+    //  encore : un critère coché dont le champ est vide laisse le bouton
+    //  « Créer » éteint, et rien à l'écran ne le dirait autrement.
     Label {
       Layout.columnSpan: grille.columns
       Layout.fillWidth: true
@@ -388,14 +463,40 @@ IfaPopup {
       color: Theme.secondaryTextColor
       wrapMode: Text.WordWrap
 
-      text: {
-        if (fenetre.modeFiltre === "region") {
-          return comboRegion.currentIndex >= 0 ? qsTr("Toutes les unités de la région %1 seront embarquées.").arg(comboRegion.currentText) : qsTr("Choisissez d'abord une région administrative ci-dessus.");
-        }
-        if (fenetre.modeFiltre === "lce") {
-          return champLce.text !== "" ? qsTr("Seules les unités du plan d'eau n° %1 seront embarquées.").arg(champLce.text) : qsTr("Saisissez d'abord un n° de plan d'eau ci-dessus.");
-        }
-        return qsTr("Seules les unités situées dans l'emprise tracée seront embarquées.");
+      text: fenetre.explicationFiltre()
+    }
+
+    // ---- Nom du bassin -----------------------------------------------------------
+    //  Contrairement à la région et au n° de plan d'eau, qui reprennent les
+    //  champs de l'unité saisis plus haut, le bassin n'appartient pas à
+    //  l'identité de l'unité créée : il ne sert qu'à choisir ce qu'on emporte.
+    //  D'où un champ à lui, ici, dans le bloc auquel il appartient.
+    Label {
+      Layout.fillWidth: fenetre.compact
+      visible: fenetre.estActif("bassin")
+      text: qsTr("Nom du bassin")
+      font: Theme.strongTipFont
+      color: Theme.secondaryTextColor
+    }
+
+    ColumnLayout {
+      Layout.fillWidth: true
+      visible: fenetre.estActif("bassin")
+      spacing: 2
+
+      TextField {
+        id: champBassin
+
+        Layout.fillWidth: true
+        placeholderText: qsTr("ex. Saguenay, Outaouais…")
+      }
+
+      Label {
+        Layout.fillWidth: true
+        text: qsTr("Recherche partielle : tout fragment du nom convient, majuscules ou non. Deux caractères minimum.")
+        font: Theme.tinyFont
+        color: Theme.secondaryTextColor
+        wrapMode: Text.WordWrap
       }
     }
 
@@ -405,7 +506,7 @@ IfaPopup {
       Layout.fillWidth: true
       Layout.preferredHeight: blocEmprise.implicitHeight + 24
 
-      visible: fenetre.modeFiltre === "emprise"
+      visible: fenetre.estActif("emprise")
 
       radius: 12
       color: Theme.controlBackgroundAlternateColor
@@ -473,6 +574,19 @@ IfaPopup {
   }
 
   // ---------------------------------------------------------------------------
+  //  Le projet de saisie, une fois prêt
+  // ---------------------------------------------------------------------------
+  //  Rattaché à la zone utile et non à cette fenêtre : `onPret` la referme au
+  //  moment même où le projet devient disponible, et un dialogue posé dans
+  //  cette fenêtre disparaîtrait avec elle.
+  DialogueProjetPret {
+    id: dialogueProjet
+
+    zoneParente: fenetre.zoneUtile
+    accent: fenetre.accent
+  }
+
+  // ---------------------------------------------------------------------------
   //  Tracé de l'emprise sur la carte
   // ---------------------------------------------------------------------------
   //  Le sélecteur se rattache lui-même au conteneur de la carte : il sort donc
@@ -506,16 +620,65 @@ IfaPopup {
       text: qsTr("Annuler")
       bgcolor: "transparent"
       color: Theme.secondaryTextColor
-      onClicked: fenetre.close()
+      onClicked: {
+        // La préparation en cours n'est pas interrompue côté serveur : le
+        // projet restera disponible dans « Projets ». Seul le suivi s'arrête.
+        formulaire.annuler();
+        fenetre.close();
+      }
     },
     QfButton {
-      text: qsTr("Créer")
-      enabled: fenetre.saisieComplete && fenetre.coucheMesurage !== null
+      text: fenetre.preparationEnCours ? qsTr("Préparation…") : qsTr("Créer")
+      enabled: fenetre.saisieComplete && fenetre.serveurJoignable && !fenetre.preparationEnCours
       bgcolor: fenetre.accent
       color: fenetre.surAccent
       onClicked: fenetre.creerUe()
     }
   ]
+
+  // ===========================================================================
+  //  Préparation du projet de saisie
+  // ===========================================================================
+  //  Création de l'unité et projet `formulaire_UE_IFA` sur le serveur, attente
+  //  du packaging, puis nom du projet à ouvrir. Voir `ServiceFormulaire.qml`.
+  ServiceFormulaire {
+    id: formulaire
+
+    session: fenetre.session
+
+    onProgression: function (message) {
+      fenetre.activite = message;
+    }
+
+    onPret: function (infos) {
+      // L'unité est créée, le projet est packagé : la fenêtre a fini son
+      // travail. Elle se referme pour ne pas inviter à renvoyer le même
+      // identifiant, et laisse la carte au technicien — rien n'est remplacé.
+      fenetre.activite = "";
+      fenetre.close();
+    }
+
+    onOuvertureManuelle: function (nomProjet, paquetPret) {
+      // QField n'ouvre pas le projet de lui-même : le nommer est tout ce dont
+      // le technicien a besoin pour le trouver dans l'écran « Projets ». Un
+      // toast s'effaçait au bout de quelques secondes, et arrivait au moment
+      // même où cette fenêtre se referme — le nom du projet se perdait. D'où
+      // un dialogue, qui ne part qu'à la demande.
+      //
+      // Le message part aussi quand l'attente du packaging a expiré, sans que
+      // `pret` ait été émis : le code de l'unité se lit donc sur le service,
+      // qui le tient depuis la réponse du serveur, et non sur `pret`.
+      fenetre.activite = "";
+      dialogueProjet.annoncer(nomProjet, qsTr("L'unité %1 est créée et verrouillée à votre nom.").arg(fenetre.codeUniteCreee()), paquetPret);
+    }
+
+    onEchec: function (message) {
+      // La fenêtre est encore là : la saisie est intacte, l'appui peut être
+      // rejoué une fois la cause levée.
+      fenetre.activite = "";
+      fenetre.avertir(message, "error");
+    }
+  }
 
   // ===========================================================================
   //  Fonctions
@@ -574,68 +737,145 @@ IfaPopup {
     empriseSommets = [];
   }
 
-  // Pose les variables de projet puis ouvre le formulaire de saisie.
+  // Demande au serveur le projet de saisie, puis laisse le service enchaîner
+  // sur le téléchargement et l'ouverture.
   function creerUe() {
-    referentiels.definirVariableProjet("code_region", comboRegion.currentValue);
-    referentiels.definirVariableProjet("code_formulaire", comboType.currentValue);
-    referentiels.definirVariableProjet("type_formulaire", comboType.currentText);
-    referentiels.definirVariableProjet("code_lce", champLce.text);
-    referentiels.definirVariableProjet("une_code_ident", champIdentifiant.text.trim());
-    referentiels.definirVariableProjet("code_projet", comboProjet.currentValue);
-
-    enregistrerFiltre();
-
-    if (ouvrirFormulaireMesurage()) {
-      close();
-    }
+    formulaire.creer(uniteACreer(), filtreDonnees(), variablesProjet());
   }
 
-  // Critère de filtrage des données à embarquer, conservé en variables de
-  // projet. C'est ce que le point d'accès QFieldCloud consommera pour extraire
-  // le sous-ensemble dans les GeoPackage du projet dérivé.
-  function enregistrerFiltre() {
-    referentiels.definirVariableProjet("filtre_mode", modeFiltre);
+  // Le code de l'unité tel que la base le porte, ou la saisie si le serveur
+  // n'a pas encore répondu.
+  function codeUniteCreee() {
+    const unite = formulaire.uniteCreee;
 
-    let valeur = "";
-    if (modeFiltre === "region")
-      valeur = comboRegion.currentValue ? comboRegion.currentValue : "";
-    else if (modeFiltre === "lce")
-      valeur = champLce.text;
+    if (unite && unite["une_code_ident"])
+      return "" + unite["une_code_ident"];
 
-    referentiels.definirVariableProjet("filtre_valeur", valeur);
-
-    // WKT en EPSG:4326, et sa boîte englobante au format attendu par le champ
-    // `extent` du seed QFieldCloud : [xmin, ymin, xmax, ymax].
-    referentiels.definirVariableProjet("filtre_emprise_wkt", modeFiltre === "emprise" ? empriseWkt : "");
-    referentiels.definirVariableProjet("filtre_emprise_bbox", modeFiltre === "emprise" && empriseBbox ? JSON.stringify(empriseBbox) : "");
+    return champIdentifiant.text.trim();
   }
 
-  // Bascule QField sur la couche « mesurage » et ouvre le tiroir de saisie sur
-  // une nouvelle entité sans géométrie.
-  function ouvrirFormulaireMesurage() {
-    const tableauDeBord = iface.findItemByObjectName("dashBoard");
-    const tiroirFormulaire = iface.findItemByObjectName("overlayFeatureFormDrawer");
+  // L'unité que le serveur inscrira dans `unite_echan`. Le type voyage par son
+  // libellé : c'est ce que porte la liste des types du plugin, et le serveur le
+  // résout en `tue_code_ident` dans le référentiel.
+  function uniteACreer() {
+    return {
+      "une_code_ident": champIdentifiant.text.trim(),
+      "type_ue": comboType.currentText
+    };
+  }
 
-    if (!tableauDeBord || !tiroirFormulaire) {
-      avertir(qsTr("Interface QField inattendue : impossible d'ouvrir le formulaire."), "error");
-      return false;
+  function estActif(mode) {
+    return criteresActifs.indexOf(mode) !== -1;
+  }
+
+  // Un critère coché est-il utilisable ? Les bornes reprennent celles du
+  // serveur.
+  function critereRenseigne(mode) {
+    if (mode === "region")
+      return comboRegion.currentIndex >= 0;
+    if (mode === "lce")
+      return champLce.text !== "";
+    if (mode === "bassin")
+      return champBassin.text.trim().length >= 2;
+    return empriseWkt !== "";
+  }
+
+  // Critères de filtrage des données à embarquer. Le serveur en tire la liste
+  // des unités dont les inventaires partiront dans le GeoPackage du projet ;
+  // il les croise, comme le fait la recherche.
+  function filtreDonnees() {
+    const liste = [];
+
+    for (let i = 0; i < criteresActifs.length; ++i) {
+      liste.push(critereDonnees(criteresActifs[i]));
     }
 
-    if (!coucheMesurage) {
-      avertir(qsTr("La couche « mesurage » est absente du projet ouvert."), "warning");
-      return false;
+    return liste;
+  }
+
+  function critereDonnees(mode) {
+    if (mode === "emprise") {
+      // WKT en EPSG:4326, et sa boîte englobante au format attendu par le
+      // champ `extent` du seed QFieldCloud : [xmin, ymin, xmax, ymax].
+      return {
+        "mode": "emprise",
+        "wkt": empriseWkt,
+        "bbox": empriseBbox
+      };
     }
 
-    tableauDeBord.activeLayer = coucheMesurage;
-    tableauDeBord.ensureEditableLayerSelected();
+    if (mode === "region")
+      return {
+        "mode": "region",
+        "valeur": comboRegion.currentValue ? comboRegion.currentValue : ""
+      };
 
-    const geometrie = GeometryUtils.createGeometryFromWkt("");
-    const entite = FeatureUtils.createFeature(tableauDeBord.activeLayer, geometrie);
+    if (mode === "bassin")
+      return {
+        "mode": "bassin",
+        "valeur": champBassin.text.trim()
+      };
 
-    tiroirFormulaire.featureModel.feature = entite;
-    tiroirFormulaire.state = "Add";
-    tiroirFormulaire.open();
+    return {
+      "mode": "lce",
+      "valeur": champLce.text
+    };
+  }
 
-    return true;
+  // La phrase affichée sous les pastilles : ce qui partira, ou ce qui manque.
+  function explicationFiltre() {
+    if (criteresActifs.length === 0)
+      return qsTr("Cochez au moins un critère : le projet doit savoir quoi embarquer.");
+
+    const manquants = [];
+    for (let i = 0; i < criteresActifs.length; ++i) {
+      if (!critereRenseigne(criteresActifs[i]))
+        manquants.push(libelleCritere(criteresActifs[i]));
+    }
+
+    if (manquants.length > 0)
+      return qsTr("À renseigner avant de créer : %1.").arg(manquants.join(qsTr(", ")));
+
+    const portees = [];
+    for (let j = 0; j < criteresActifs.length; ++j) {
+      portees.push(porteeCritere(criteresActifs[j]));
+    }
+
+    if (portees.length === 1)
+      return qsTr("Seront embarquées : les unités %1.").arg(portees[0]);
+
+    return qsTr("Seront embarquées : les unités qui sont à la fois %1.").arg(portees.join(qsTr(" et ")));
+  }
+
+  function libelleCritere(mode) {
+    for (let i = 0; i < criteresDisponibles.length; ++i) {
+      if (criteresDisponibles[i]["cle"] === mode)
+        return criteresDisponibles[i]["libelle"];
+    }
+    return mode;
+  }
+
+  function porteeCritere(mode) {
+    if (mode === "region")
+      return qsTr("de la région %1").arg(comboRegion.currentText);
+    if (mode === "lce")
+      return qsTr("du plan d'eau n° %1").arg(champLce.text);
+    if (mode === "bassin")
+      return qsTr("dont le bassin contient « %1 »").arg(champBassin.text.trim());
+    return qsTr("situées dans l'emprise tracée");
+  }
+
+  // Le contexte de l'unité à créer. Ces noms sont ceux que lisent les valeurs
+  // par défaut du formulaire QGIS : le serveur les inscrira comme variables du
+  // projet livré, puisque ce n'est plus le projet ouvert qui recevra la saisie.
+  function variablesProjet() {
+    return {
+      "code_region": "" + (comboRegion.currentValue ? comboRegion.currentValue : ""),
+      "code_projet": "" + (comboProjet.currentValue ? comboProjet.currentValue : ""),
+      "code_formulaire": "" + (comboType.currentValue ? comboType.currentValue : ""),
+      "type_formulaire": "" + comboType.currentText,
+      "code_lce": "" + champLce.text,
+      "une_code_ident": champIdentifiant.text.trim()
+    };
   }
 }

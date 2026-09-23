@@ -9,9 +9,11 @@ IFA 2.0
 ├── Gestionnaire de projet
 │   ├── Créer un projet                    → FenetreCreerProjet.qml     (squelette)
 │   └── Modifier / Afficher un projet      → FenetreModifierProjet.qml  (squelette)
-└── Gestionnaire d'unité d'échantillonnage
-    ├── Créer une UE                       → FenetreCreerUE.qml         (fonctionnel)
-    └── Consulter une UE                   → FenetreConsulterUE.qml     (squelette)
+├── Gestionnaire d'unité d'échantillonnage
+│   ├── Créer une UE                       → FenetreCreerUE.qml         (fonctionnel)
+│   └── Consulter une UE                   → FenetreConsulterUE.qml     (fonctionnel)
+└── Validation des données
+    └── Rapport de validation              → FenetreValidation.qml      (fonctionnel)
 ```
 
 ---
@@ -22,14 +24,24 @@ IFA 2.0
 |---|---|
 | `main.qml` | Point d'entrée : bouton de la barre d'outils, **registre des menus**, routage vers les fenêtres. |
 | `MenuPrincipal.qml` | La fenêtre du menu. Se construit entièrement à partir du registre — ne contient aucune commande en dur. |
-| `IfaPopup.qml` | Coquille commune des fenêtres : responsive, en-tête coloré, contenu défilant, pied d'actions. |
+| `IfaPopup.qml` | Coquille commune des fenêtres : responsive, en-tête coloré, bandeau d'activité épinglé, contenu défilant, pied d'actions. |
 | `IfaCommande.qml` | Une ligne de commande cliquable du menu. |
 | `IfaChantier.qml` | Bandeau « fonction en cours de développement » des squelettes. |
+| `ChoixCriteres.qml` | Rangée de pastilles cochables : la sélection **multicritère** des deux fenêtres de filtrage — voir §6 et §7. |
 | `Referentiels.qml` | Listes de référence (régions, types d'UE) et accès défensifs aux couches. |
 | `SelecteurEmprise.qml` | Tracé d'une emprise polygonale sur la carte — voir §6. |
-| `SessionCloud.qml` | Jeton et appels authentifiés à QFieldCloud — voir §9. |
+| `SessionCloud.qml` | Jeton et appels authentifiés à QFieldCloud — voir §10. |
 | `ServiceUE.qml` | Recherche des unités d'échantillonnage sur le serveur — voir §7. |
+| `ServiceOuverture.qml` | Ouverture d'une UE dans QField : verrou, projet d'affichage, packaging — voir §7. |
+| `ServiceFormulaire.qml` | Création de l'UE et préparation de son projet de saisie — voir §6. |
+| `ServiceVerrou.qml` | Levée du verrou d'une UE, à la demande de son détenteur — voir §7 et §8. |
+| `ServiceValidation.qml` | Guette les synchronisations et va chercher le rapport de validation — voir §8. |
+| `FenetreValidation.qml` | Verdict, compteurs et anomalies du rapport — voir §8. |
+| `DialogueDeverrouillage.qml` | Après une synchronisation : rendre l'unité, ou la garder — voir §8. |
+| `DialogueRaisonVerrou.qml` | Saisie du motif du verrouillage, avec motifs suggérés. |
+| `DialogueProjetPret.qml` | Le nom du projet préparé, à ouvrir depuis l'écran « Projets » — dialogue persistant, voir §6. |
 | `TableauUE.qml` | Liste des unités : tableau sur grand écran, fiches sur téléphone. |
+| `ExplorateurProjets.qml` | Parcours de `cloud_projects` sur le disque. **Sans appelant aujourd'hui** : conservé pour ce qu'il sait de l'arborescence des projets. |
 | `EtiquetteVerrou.qml` | Pastille d'état de verrouillage d'une UE. |
 | `FenetreCreerUE.qml` | Formulaire de création d'une UE — **le modèle à suivre** pour les autres. |
 | `Fenetre*.qml` | Une fenêtre par commande. |
@@ -131,7 +143,8 @@ Ajouter un **menu** entier suit la même logique : une entrée de plus dans
 | Élément | Usage |
 |---|---|
 | `referentiels` | Injecté automatiquement — voir §4. |
-| `session` | Injectée automatiquement — appels authentifiés au serveur, voir §9. |
+| `session` | Injectée automatiquement — appels authentifiés au serveur, voir §10. |
+| `validation` | Injecté automatiquement — suivi de la validation, voir §8. |
 | `avertir(message, type)` | Notification QField. `type` : `"info"`, `"warning"`, `"error"`. |
 | `compact` | `true` sur écran étroit (< 520 px), pour adapter la mise en page. |
 | `accent`, `surAccent` | Couleur d'accent et couleur de texte contrastée correspondante. |
@@ -173,42 +186,95 @@ commande dégradée n'empêche pas d'utiliser les autres.
 
 | Couche | Rôle | Si absente |
 |---|---|---|
-| `mesurage` | Couche de saisie ouverte à la validation. | Bandeau d'avertissement, bouton « Créer » désactivé. |
 | `proje_sonda` | Liste des projets. | Liste de projets vide. |
 | `LCE` | Recherche du plan d'eau par n° officiel. | Message « vérification impossible ». |
 | `regio_s` | Présélection de la région par GPS. | Pas de présélection. |
 
-À la validation, la fenêtre pose les variables de projet `code_region`,
-`code_formulaire`, `type_formulaire`, `code_lce`, `une_code_ident`,
-`code_projet` (elles alimentent les valeurs par défaut du formulaire QGIS), puis
-ouvre le tiroir de saisie sur une nouvelle entité de `mesurage`.
+Aucune n'est indispensable : la saisie n'a plus lieu dans le projet ouvert, mais
+dans le projet que le serveur prépare (§6). Ce qui manque vraiment à la fenêtre,
+c'est une **session QFieldCloud** — sans elle, un bandeau le dit et « Créer »
+reste désactivé.
 
 ---
 
-## 6. Filtre des données à embarquer
+## 6. Créer une UE : le projet de saisie
 
-Le bloc « Données à embarquer », en bas du formulaire « Créer une UE », choisit
-le sous-ensemble de données extrait dans les GeoPackage du projet dérivé. Trois
-critères, repris de `extract_ipe_subset.py` avec le n° de plan d'eau en plus :
+Un appui sur « Créer » ne remplit plus le projet ouvert. Il inscrit l'unité dans
+la base, demande au serveur le projet `formulaire_UE_IFA` de l'utilisateur, et
+le signale une fois prêt :
 
-| Critère | Source de la valeur |
-|---|---|
-| **Région** | La région administrative saisie plus haut. |
-| **N° de plan d'eau** | Le n° LCE saisi plus haut. |
-| **Emprise personnalisée** | Un polygone tracé sur la carte. |
+```
+POST /api/v1/ifa/formulaire/preparer/     ServiceFormulaire
+      ↓  le serveur crée l'UE, clone le modèle, remplit le GeoPackage, package
+GET  /api/v1/jobs/<id>/  (sondage)        ServiceFormulaire
+      ↓  packaging terminé
+téléchargement demandé · projet nommé     ServiceFormulaire
+```
 
-Le critère retenu est enregistré en variables de projet :
+### L'unité est créée et verrouillée tout de suite
 
-| Variable | Contenu |
-|---|---|
-| `filtre_mode` | `region`, `lce` ou `emprise`. |
-| `filtre_valeur` | Code de région ou n° LCE selon le mode ; vide en mode emprise. |
-| `filtre_emprise_wkt` | `POLYGON((…))` en **EPSG:4326**. |
-| `filtre_emprise_bbox` | `[xmin, ymin, xmax, ymax]` en EPSG:4326, JSON. |
+Avant même de préparer le projet, le serveur écrit la nouvelle unité dans
+`ifa_data.unite_echan` et la **verrouille** au nom de l'utilisateur, avec pour
+raison « nouvelle Unité d'échantillonnage ». C'est ce qui réserve son code :
+l'identifiant est composé de la région, du n° de plan d'eau et du type, et deux
+équipes qui visent le même plan d'eau le même jour composeraient le même.
 
-Le WKT est produit en EPSG:4326 et non dans le CRS des données : c'est le
+La fenêtre envoie donc `une_code_ident` et `type_ue` **à part** des `variables`,
+bien qu'ils y figurent aussi : ce qui entre dans la base métier ne doit pas
+dépendre d'un dictionnaire libre dont le serveur ignore les clés inconnues. Le
+type voyage par son libellé — c'est ce que porte `Referentiels.typesUe` — et le
+serveur le résout en `tue_code_ident`.
+
+Deux conséquences visibles depuis la fenêtre :
+
+* un identifiant déjà porté par une unité du fonds est refusé (`409`), et le
+  message invite à le modifier. Le cas est courant : le fonds contient des
+  unités de 2009 sur les mêmes plans d'eau ;
+* si la préparation du projet échoue *ensuite*, l'unité reste créée et tenue.
+  Rejouer « Créer » avec le même identifiant **reprend** la création au lieu de
+  buter dessus.
+
+Le serveur retrouve — ou crée à partir du projet modèle
+`v8_default_config_pkey_ObvervationGenTest` d'`ifa_team` — le projet
+`formulaire_UE_IFA` **sous le compte de l'utilisateur**, et remplit son
+GeoPackage des données choisies ci-dessous, lues dans le schéma `ifa_data`, la
+nouvelle unité comprise. Voir le §5 du README de `qfieldcloud.ifa` pour ce qui
+se passe côté serveur.
+
+### Les données à embarquer
+
+Le bloc « Données à embarquer », en bas du formulaire, choisit le sous-ensemble
+extrait. Quatre critères, repris de `extract_ipe_subset.py` avec le n° de plan
+d'eau et le nom de bassin en plus :
+
+| Critère | Source de la valeur | Envoyé comme |
+|---|---|---|
+| **Région** | La région administrative saisie plus haut. | `{"mode": "region", "valeur": "02"}` |
+| **N° de plan d'eau** | Le n° LCE saisi plus haut. | `{"mode": "lce", "valeur": "12777"}` |
+| **Nom du bassin** | Un champ propre au bloc : le bassin n'appartient pas à l'identité de l'unité créée. | `{"mode": "bassin", "valeur": "Saguenay"}` |
+| **Emprise personnalisée** | Un polygone tracé sur la carte, voir plus bas. | `{"mode": "emprise", "wkt": "POLYGON((…))", "bbox": […]}` |
+
+Les critères se cochent **indépendamment** (`ChoixCriteres`) et partent dans un
+tableau `criteres`. Le serveur les croise : une unité doit les satisfaire tous
+pour être embarquée.
+
+Le WKT est produit en **EPSG:4326** et non dans le CRS des données : c'est le
 format attendu par le champ `extent` du seed QFieldCloud, et cela laisse au
 serveur le soin de reprojeter vers le CRS de la base.
+
+**Le n° de plan d'eau reste coché par défaut**, et c'est délibéré : douze des
+dix-huit régions portent plus de 2 000 unités — jusqu'à 57 676 pour la région
+01, 12 561 pour la 02 — et le serveur refuse au-delà de ce plafond, un
+GeoPackage de cette taille n'étant pas téléchargeable sur le terrain. C'est
+précisément ce que le croisement débloque : « Région » seule échoue sur les
+grandes régions, mais « Région **et** bassin » ou « Région **et** emprise »
+ramène la sélection à ce qu'un appareil de terrain télécharge. Le plafond se
+règle par `IFA_FORMULAIRE_UNITES_MAX` côté serveur, sans redéploiement du
+plugin.
+
+La phrase sous les pastilles dit ce qui partira, ou nomme ce qui manque : un
+critère coché dont le champ est vide laisse le bouton « Créer » éteint, et rien
+d'autre à l'écran ne le dirait.
 
 ### Tracer une emprise
 
@@ -262,19 +328,97 @@ créé.
 
 ---
 
+### Les variables partent avec la demande
+
+La fenêtre posait autrefois `code_region`, `code_projet`, `code_formulaire`,
+`type_formulaire`, `code_lce` et `une_code_ident` sur le projet ouvert, d'où les
+valeurs par défaut du formulaire QGIS les lisent. Ce n'est plus lui qui recevra
+la saisie : elles voyagent donc dans le corps de la requête (`variables`), et le
+serveur les inscrit dans le `.qgs` livré.
+
+### Le dernier geste reste manuel
+
+Une fois le packaging terminé, le service demande le téléchargement à
+`QFieldCloudProjectsModel` puis **nomme le projet à ouvrir**. Rien n'est fermé,
+rien n'est remplacé : le technicien garde son projet à l'écran et ouvre le
+nouveau depuis « Projets » quand il le décide. C'est exactement ce que fait
+`ServiceOuverture` après l'ouverture d'une UE.
+
+Ce nom est annoncé dans un **dialogue modal** (`DialogueProjetPret`), pas dans
+un toast. Un toast s'efface au bout de quelques secondes, et il arrive au moment
+précis où la fenêtre « Créer une UE » se referme et où la carte réapparaît —
+c'est-à-dire là où le regard n'est pas. Le nom du projet se perdait, et c'est la
+seule prise pour retrouver son travail dans la liste. Le dialogue ne part que
+sur « J'ai compris » ; le nom y est détaché du texte, dans son propre cadre.
+
+Il connaît deux états. Quand le packaging est terminé, il annonce un projet
+**prêt**. Quand l'attente a expiré côté plugin — `sondagesMax` dépassé, le
+serveur travaille encore —, il le dit et invite à rafraîchir la liste dans
+quelques minutes. Promettre un projet absent de l'écran « Projets » enverrait le
+technicien chercher pour rien. C'est pourquoi `ServiceFormulaire.ouvertureManuelle`
+porte un second argument, `paquetPret` : `ServiceOuverture` n'en a pas besoin,
+lui n'émet ce signal qu'une fois le paquet fait.
+
+Le dialogue est rattaché à `fenetre.zoneUtile` et non à la fenêtre du plugin :
+« Créer une UE » se referme sur `onPret`, au moment même où le projet devient
+disponible, et un dialogue posé dans cette fenêtre disparaîtrait avec elle.
+
+Une version précédente allait plus loin : elle fermait le projet ouvert
+(`iface.clearProject()`), guettait l'arrivée du fichier sur le disque, puis
+l'ouvrait par `iface.loadFile()`. **Essayé sur l'appareil : ni le retour à
+l'accueil ni l'ouverture automatique n'aboutissent.** Ces étapes ont été
+retirées plutôt que laissées à demi fonctionnelles — une fenêtre qui ferme le
+projet sans parvenir à en ouvrir un autre laisse le technicien plus mal qu'elle
+ne l'a trouvé.
+
+Le téléchargement lui-même n'est pas garanti : `QFieldCloudProjectsModel` ne
+fait pas partie de l'API des greffons et QField ne lui pose pas d'`objectName`,
+donc `findItemByObjectName()` ne le trouve pas. On n'en instancie jamais un :
+celui d'un greffon n'a pas de `cloudConnection`, et `refreshProjectsList()` la
+déréférence — QField plante, et un `try` QML n'attrape rien de ce qui se passe
+dans le C++. L'échec est sans conséquence : le message part de toute façon, et
+QField télécharge le projet quand on l'ouvre.
+
+### Ce que voit le technicien
+
+Le bandeau d'activité de la fenêtre donne l'étape — « Création de l'unité… »,
+puis « Unité 02-12777-IPE créée et verrouillée — packaging en cours… ». La
+fenêtre se referme quand le projet est prêt, et une notification nomme les deux
+choses qui comptent :
+
+> Unité 02-12777-IPE créée et verrouillée. Ouvrez le projet
+> « formulaire_UE_IFA » depuis l'écran Projets de QField.
+
+Elle se referme parce que son travail est fait, et pour ne pas inviter à
+renvoyer le même identifiant — une seconde demande identique serait traitée
+comme une reprise, pas comme une nouvelle unité.
+
+En cas d'échec, la fenêtre reste ouverte **avec la saisie intacte** : l'appui
+peut être rejoué une fois la cause levée.
+
 ## 7. Consulter une UE
 
 La fenêtre enchaîne deux étapes.
 
-**Étape 1 — filtre.** Quatre critères : région, n° de plan d'eau, zone
-personnalisée (le `SelecteurEmprise` du §6, réutilisé tel quel), ou fragment de
-code d'UE.
+**Étape 1 — filtre.** Cinq critères : région, n° de plan d'eau, nom de bassin,
+zone personnalisée (le `SelecteurEmprise` du §6, réutilisé tel quel), et
+fragment de code d'UE.
 
-Le critère « Code d'UE » est une **recherche partielle** : le serveur cherche la
-saisie n'importe où dans `une_code_ident`, sans tenir compte de la casse. Un
-technicien qui tape `12777` obtient les unités de ce plan d'eau tous types
-confondus, `ANRO` celles du réseau, `02-127` celles dont le code commence ainsi.
-Deux caractères au minimum — en deçà, le bouton « Rechercher » reste désactivé.
+Ils se cochent **indépendamment les uns des autres** (`ChoixCriteres`) et se
+**croisent** : une unité doit les satisfaire tous. Chaque critère coché resserre
+donc la liste — c'est ce qui rend la région praticable comme point de départ,
+puisque seule elle rend plus de douze mille unités. Le bouton « Rechercher »
+reste éteint tant qu'un critère coché n'est pas renseigné : un critère vide ne
+restreindrait rien, alors que le technicien le croirait posé.
+
+Les critères « Code d'UE » et « Nom du bassin » sont des **recherches
+partielles** : le serveur cherche la saisie n'importe où dans la colonne, sans
+tenir compte de la casse. Un technicien qui tape `12777` obtient les unités de
+ce plan d'eau tous types confondus, `ANRO` celles du réseau, `02-127` celles
+dont le code commence ainsi. Pour le bassin, c'est la seule forme praticable :
+`infor_gener.ing_nom_bassi` est un texte libre du fonds hérité, où « Saguenay »
+et « SAGUENAY (BASSIN) » coexistent. Deux caractères au minimum dans les deux
+cas — en deçà, le bouton « Rechercher » reste désactivé.
 
 **Étape 2 — résultats.** Un rappel du filtre avec un bouton « Modifier », puis
 la liste des unités. Les colonnes reprennent la table `unite_echan` :
@@ -283,17 +427,31 @@ la liste des unités. Les colonnes reprennent la table `unite_echan` :
 |---|---|
 | Code UE | `une_code_ident` |
 | Type d'UE | `tue_nom` (via `tue_code_ident`) |
-| Verrou | `une_ind_verro` (`O`/`N`) + `une_nom_propr_verro` en infobulle |
-| Créée le / Par | `une_date_creat` / `une_code_utili_creat` |
-| Modifiée le | `une_date_maj` |
+| Verrou | `une_ind_verro` (`O`/`N`), et **le nom du détenteur écrit sous la pastille** (`une_nom_propr_verro`, « par vous » quand c'est le compte connecté) |
+| Créée le / Créée par | `une_date_creat` / `une_code_utili_creat` |
+| Modifiée le / Par | `une_date_maj` / `une_code_utili_maj` |
 | Actions | ouvrir et verrouiller · ouvrir sans verrouiller · supprimer |
 
-Une unité déjà verrouillée voit « ouvrir et verrouiller » et « supprimer »
-désactivés, l'infobulle nommant le détenteur du verrou. La suppression passe
-obligatoirement par une confirmation qui nomme l'unité.
+**Détenteur du verrou et auteur de la dernière mise à jour sont deux choses
+distinctes.** Le détenteur (`une_nom_propr_verro`) est celui à qui s'adresser
+*maintenant* pour obtenir l'unité ; l'auteur de la mise à jour
+(`une_code_utili_maj`) est celui qui a écrit les dernières données. Une unité
+rendue garde l'auteur de sa dernière saisie sans avoir de détenteur, et une
+unité fraîchement verrouillée n'a pas encore été modifiée par celui qui la
+tient. D'où deux colonnes, et non une.
 
-`TableauUE` bascule en fiches empilées sous 640 px de large. Un tableau de neuf
-colonnes n'est pas seulement illisible sur un téléphone : atteindre la corbeille
+Le nom du détenteur est **écrit**, pas mis en infobulle : une infobulle ne
+s'atteint pas au doigt, et sur une tablette de terrain l'information n'existait
+donc pas. L'infobulle de la pastille subsiste pour les noms trop longs pour la
+colonne, qui y sont élidés.
+
+Une unité déjà verrouillée voit « ouvrir et verrouiller » et « supprimer »
+désactivés. La suppression passe obligatoirement par une confirmation qui nomme
+l'unité.
+
+`TableauUE` bascule en fiches empilées sous 640 px de large — la fiche porte la
+même information, le détenteur sur sa propre ligne. Un tableau de huit colonnes
+n'est pas seulement illisible sur un téléphone : atteindre la corbeille
 demanderait un défilement horizontal, geste propice aux suppressions
 accidentelles.
 
@@ -310,23 +468,48 @@ servi par l'application Django `qfieldcloud.ifa` (dossier
 ministère — schéma `ifa_data`, **en lecture seule** — de sorte que QField n'a
 jamais d'accès direct à PostgreSQL.
 
-Corps de la requête, un critère à la fois :
+Corps de la requête — les critères cochés, croisés par le serveur :
+
+```json
+{
+  "criteres": [
+    { "mode": "region",  "valeur": "02" },
+    { "mode": "bassin",  "valeur": "Saguenay" }
+  ],
+  "limite": 200,
+  "decalage": 0
+}
+```
+
+Les modes disponibles :
 
 ```json
 { "mode": "region",  "valeur": "02" }
 { "mode": "lce",     "valeur": "12777" }
+{ "mode": "bassin",  "valeur": "Saguenay" }     // fragment, casse indifférente
 { "mode": "code",    "valeur": "12777" }        // fragment, casse indifférente
 { "mode": "emprise", "wkt": "POLYGON((…))", "bbox": [xmin, ymin, xmax, ymax] }
 ```
 
+Un même mode ne peut figurer qu'une fois : deux régions croisées par `AND` ne
+rendraient jamais rien.
+
 Réponse :
 
 ```json
-{ "mode": "region", "total": 12561, "limite": 200, "decalage": 0,
+{ "mode": "region",
+  "criteres": [ { "mode": "region", "valeur": "02" },
+                { "mode": "bassin", "valeur": "Saguenay" } ],
+  "filtre": "région 02 et bassin « Saguenay »",
+  "total": 12561, "limite": 200, "decalage": 0,
   "tronque": true, "resultats": [ … ] }
 ```
 
-Deux points valent d'être connus côté serveur :
+`mode` n'y reprend que le premier critère : il est conservé pour les plugins
+antérieurs, qui envoient encore `mode` et `valeur` à plat et que le serveur
+continue d'accepter.
+
+Trois points valent d'être connus côté serveur :
 
 - **la région ne se lit pas dans le code d'UE.** Le préfixe (`02-…`) s'en
   approche mais ment : plus de 5 000 unités portent un préfixe différent de la
@@ -335,6 +518,11 @@ Deux points valent d'être connus côté serveur :
 - **la zone personnalisée s'appuie sur `infor_gener.shape`** (EPSG:32187). Le
   polygone du filtre est reprojeté vers ce SRID plutôt que l'inverse :
   transformer 638 000 points à chaque recherche condamnerait l'index GiST.
+- **le nom de bassin vit dans `infor_gener.ing_nom_bassi`**, un texte libre
+  saisi au fil des années sans référentiel fermé. D'où la recherche par
+  fragment, insensible à la casse : exiger la graphie exacte ne servirait qu'à
+  ceux qui savent déjà ce que la base contient. Le nom accompagne désormais
+  chaque ligne de résultat (`ing_nom_bassi`).
 
 ### Pagination
 
@@ -347,24 +535,264 @@ recoller quoi que ce soit.
 
 ### Authentification
 
-`SessionCloud.qml` s'occupe du jeton — voir §9.
+`SessionCloud.qml` s'occupe du jeton — voir §10.
+
+### Ouvrir une unité
+
+Les deux boutons d'ouverture passent par `ServiceOuverture.qml`, qui interroge
+`POST /api/v1/ifa/unites/<code>/ouvrir/`. Le serveur y recopie le projet modèle
+sous le compte de l'utilisateur et remplit son GeoPackage des seuls inventaires
+de l'unité demandée.
+
+**« Ouvrir et verrouiller ».** `DialogueRaisonVerrou` demande d'abord le motif —
+il est obligatoire, puisque c'est ce que liront les autres équipes en tentant
+d'ouvrir la même unité. Le serveur verrouille alors l'unité dans la base
+(`une_ind_verro`, `une_nom_propr_verro`, `une_date_verro`, `une_raiso_verro`,
+plus `une_date_maj` et `une_code_utili_maj`), puis prépare le projet
+`affichage_UE_IFA_RW`, modifiable.
+
+**« Ouvrir sans verrouiller ».** Aucune écriture dans la base : ni verrou, ni
+date de mise à jour. Le projet `affichage_UE_IFA_R` est livré avec toutes ses
+couches en lecture seule — l'unité reste disponible pour les autres équipes.
+
+Un projet d'affichage par utilisateur et par mode, réutilisé d'une unité à la
+suivante : l'appareil garde ses réglages et son cache de fonds de carte. En
+contrepartie, ouvrir une autre unité **remplace** le contenu du projet ; le
+serveur refuse de le faire tant que des modifications n'ont pas été
+synchronisées.
+
+L'ouverture se déroule en trois temps, dont le bandeau de progression rend
+compte : verrouillage, remplissage (la réponse donne le nombre d'enregistrements
+écrits), puis attente du packaging — un travail QGIS que le service suit par
+`GET /api/v1/jobs/<id>/`. Le projet est enfin proposé au téléchargement dans
+QField.
+
+Le packaging prend de quelques secondes à quelques minutes, et l'attente se
+signale à trois endroits — un seul ne suffisait pas :
+
+* un **toast** part dès le clic, avant même la réponse du serveur ;
+* la **ligne du tableau** remplace ses actions par une roue et « Ouverture… »,
+  les autres lignes se désactivant (`TableauUE.uniteEnCours`) ;
+* un **bandeau** épinglé sous l'en-tête donne l'étape en cours
+  (`IfaPopup.activite`).
+
+Le bandeau est volontairement **hors de la zone défilante**. Posé dans le flux,
+au-dessus du tableau, il sortait de l'écran dès que le technicien descendait la
+liste pour cliquer — c'est-à-dire exactement quand il servait.
+
+> L'ouverture automatique dans QField ne fonctionne pas encore.
+> `ServiceOuverture.resoudreModeleProjets()` cherche le modèle des projets par
+> `iface.findItemByObjectName()`, qui compare la propriété `objectName` — or les
+> trois noms essayés sont des `id` QML, qui n'existent qu'à la compilation. Le
+> type s'appelle d'ailleurs `QFieldCloudProjectsModel` (voir les en-têtes
+> installés sous `QField/usr/include/qfield/`), et QField ne pose `objectName`
+> que sur une courte liste d'objets dont il ne fait pas partie. Le service le
+> dit et nomme le projet à ouvrir — dans un dialogue qui reste à l'écran, voir
+> §6 : l'unité est prête dans tous les cas, seul le dernier geste reste manuel.
+
+### Rendre une unité
+
+Le premier bouton de la ligne est **le même bouton dans les deux sens**. Sur une
+unité libre, c'est un cadenas fermé : « ouvrir et verrouiller ». Sur une unité
+que l'utilisateur tient lui-même, il devient un cadenas **ouvert**, en orange :
+« déverrouiller ». Sur une unité tenue par quelqu'un d'autre, il reste fermé et
+éteint, l'infobulle nommant le détenteur.
+
+Un bouton plutôt que deux : les trois cas s'excluent, et une colonne d'actions
+qui s'allonge sur un écran de terrain est une colonne où l'on se trompe de
+cible. La fiche compacte, elle, écrit le verbe en toutes lettres — sur un
+téléphone, un cadenas seul ne dit pas s'il ferme ou s'il ouvre.
+
+**Qui a le droit.** `TableauUE.estMoi()` compare `une_nom_propr_verro` au compte
+connecté (`SessionCloud.utilisateur`), exactement et tronqué à 100 caractères —
+mot pour mot la condition du `UPDATE` que le serveur exécutera. Un rapprochement
+plus indulgent, insensible à la casse par exemple, afficherait un bouton que le
+serveur refuserait ensuite. Sans session, `utilisateur` vaut `""` et le
+déverrouillage n'est jamais proposé : le bon repli, puisque le serveur ne laisse
+lever un verrou que par son détenteur.
+
+La liste peut néanmoins avoir vieilli — un collègue a pu reprendre l'unité
+depuis la recherche. C'est le serveur qui tranche, et son refus nomme le nouveau
+détenteur.
+
+**Une confirmation.** Rendre une unité n'est pas rattrapable d'un clic : une
+autre équipe peut la prendre dans la minute, et il faudra alors attendre qu'elle
+la rende. Le dialogue nomme l'unité — le tableau est dense et les lignes se
+ressemblent — et rappelle de synchroniser avant.
+
+L'appel est `POST /api/v1/ifa/unites/<code>/deverrouiller/`, porté par
+`ServiceVerrou.qml`. Sa réponse donne l'état de verrou tel que la base le porte
+ensuite : `FenetreConsulterUE.appliquerVerrou()` s'en sert pour remettre la
+ligne à jour **sans relancer la recherche**. Une unité qui n'était déjà plus
+verrouillée n'est pas une erreur — le résultat voulu est là — mais le dire évite
+au technicien de croire que son geste a porté.
+
+Pendant l'aller-retour, la ligne remplace ses actions par une roue et
+« Déverrouillage… », et les autres lignes se désactivent : même traitement que
+l'ouverture (`TableauUE.uniteDeverrouillage`, et `occupe` qui réunit les deux).
 
 ### Ce qui reste à faire
 
-**Les trois actions** — verrouillage, ouverture en lecture et suppression — sont
-encore de simples notifications : les points d'accès correspondants n'existent
-pas côté serveur (voir les `TODO` en fin de `FenetreConsulterUE.qml`). Le verrou
-affiché dans le tableau, lui, est bien celui de la base : une unité tenue par
-quelqu'un d'autre a déjà ses actions désactivées.
+**La suppression** est encore une simple notification : `DELETE
+/api/v1/ifa/unites/<code>/` n'existe pas côté serveur.
+
+**Le retour des modifications vers la base** n'existe pas non plus : le projet
+d'affichage n'est pas relié à PostgreSQL, ce qui est saisi sur le terrain reste
+dans son GeoPackage.
+
+**La liste des projets déjà sur l'appareil** — sous le formulaire de recherche,
+avec un bouton pour ouvrir directement — a été écrite puis **retirée**, le temps
+de reprendre le sujet à tête reposée. Ce qu'elle a laissé derrière elle reste
+acquis : `ExplorateurProjets.qml`, dont l'en-tête dit où QField range ses
+projets et pourquoi `platformUtilities.appDataDirs()` ne l'indique pas.
 
 ---
 
-## 8. Bon à savoir
+## 8. Validation des données
+
+Le serveur valide les données à chaque synchronisation et dépose son verdict
+dans le paquet du projet, sous `rapport_ife.json`. C'était l'objet du plugin
+autonome `plugin_event.qml` ; il vit désormais ici, et partage la session du
+reste du programme — **un seul jeton, une seule demande de mot de passe**, là où
+deux plugins se les disputaient (voir §10).
+
+| Élément | Rôle |
+|---|---|
+| `ServiceValidation.qml` | Guette les synchronisations, va chercher le rapport. Vit dans `main.qml`. |
+| `FenetreValidation.qml` | Affiche le verdict, les compteurs et les anomalies. |
+| `DialogueDeverrouillage.qml` | Après un push : rendre l'unité, ou la garder. |
+
+Deux points d'entrée : la commande **Validation → Rapport de validation** du
+menu, et un **second bouton dans la barre d'outils** dont la couleur donne
+l'état sans rien ouvrir — vert (données conformes), rouge (anomalies
+bloquantes), gris (l'affichage n'engage rien).
+
+### L'événement, c'est un fichier local
+
+Aucune horloge n'interroge le serveur. L'état ne peut changer qu'à l'ouverture
+du projet, au push, ou sur rafraîchissement manuel — et une requête n'est émise
+qu'à ces moments-là. Au repos, le plugin ne parle pas au serveur.
+
+La seule horloge qui tourne lit `deltafile.json`, que QField écrit à chaque
+saisie et **vide** quand le serveur a accepté le push. Ni connexion ni poignée
+de main TLS : c'est cette lecture, toutes les 400 ms, qui sert d'événement.
+
+Le serveur ne rappelle jamais le plugin, et la validation se déroule *après* la
+réponse HTTP du push : une requête unique arriverait trop tôt. Le service tire
+donc quelques tentatives espacées (2, 4, 8, 15 puis 30 secondes), arrêtées dès
+que le rapport reçu est plus récent que celui affiché — c'est `genere_le` qui en
+décide, pas un délai. La fenêtre épuisée, l'état passe à « périmé » : le verdict
+est grisé et le bandeau invite à rafraîchir. **Un rapport qui ne reflète plus
+les données est plus dangereux qu'une absence de rapport**, puisqu'il rassure
+sur un état dépassé.
+
+Une exception au « une requête à chaque événement » : **au démarrage, rien ne
+part si la session n'a ni jeton ni mot de passe en mémoire**. Réclamer un mot de
+passe à l'ouverture de QField, pour un rapport que personne n'a demandé, serait
+déplacé ; la fenêtre affiche alors « Rapport non chargé » et son bouton
+« Rafraîchir » le va-chercher. Après un push, en revanche, la demande est
+attendue — c'est le technicien qui vient d'agir.
+
+> L'ancien plugin autonome `formulaires/plugins/plugin_event.qml` fait
+> double emploi avec tout ceci. Le laisser installé à côté ferait deux boutons
+> dans la barre d'outils, deux sondages du même fichier, et deux jetons qui
+> s'expirent mutuellement (voir §10) : il est à désactiver.
+
+### Ce que montre l'interface pendant l'attente
+
+Le serveur peut mettre trente secondes à produire son rapport. Rien ne doit
+laisser croire, pendant ce temps, que le plugin est figé — trois endroits le
+disent donc ensemble :
+
+| Où | Quoi |
+|---|---|
+| Bouton de la barre d'outils | Il **clignote** entre gris et couleur d'accent, avec l'étape en infobulle. |
+| Fenêtre « Rapport de validation » | Le bandeau épinglé d'`IfaPopup` — roue qui tourne et texte d'étape. Le bouton devient « Interrogation… ». |
+| Notifications | « Modifications synchronisées — validation en cours… », puis le verdict à l'arrivée. |
+
+Les notifications ne sont pas un luxe : après un push, la fenêtre de validation
+n'est pas ouverte, et le bandeau ne se voit donc pas. Le verdict n'est annoncé
+que pour le rapport **qu'on guettait** ; en annoncer un à chaque ouverture de
+projet ou à chaque « Rafraîchir » serait du bruit.
+
+> **Le clignotement vient d'une minuterie, pas d'une animation.** Une
+> `SequentialAnimation on opacity` posée sur le `QfToolButton` n'a rien donné à
+> l'écran : ce composant appartient à QField, et ce qu'il fait de son `opacity`
+> ne nous appartient pas — l'animation a échoué en silence. Une minuterie qui
+> bascule un booléen lié à `bgcolor` ne peut, elle, que repeindre.
+>
+> **Une attente trop courte ne se voit pas.** Contre le serveur local, une
+> requête revient en quelques dizaines de millisecondes : l'indication
+> apparaissait et disparaissait dans le même souffle. `attenteVisible` la
+> maintient 1,2 s de plus — du confort d'affichage, dont rien ne dépend.
+>
+> **Deux états, et non un seul.** « On attend le serveur »
+> (`enAttenteServeur`) et « l'affichage n'engage rien » (`enAttente`) ne se
+> recouvrent pas : pendant un simple rafraîchissement, le rapport déjà à
+> l'écran reste valable. Les avoir confondus grisait le verdict et faisait
+> clignoter « aucun rapport chargé » à chaque appui — et, à l'inverse, une
+> requête en vol ne levant aucun des deux, un « Rafraîchir » ne montrait
+> **rien** entre l'appui et la réponse.
+
+### Le push demande d'abord si l'unité doit être rendue
+
+> Ce dialogue et le bouton du tableau (§7) aboutissent au même point d'accès, et
+> c'est `ServiceVerrou.qml` qui le porte pour les deux : la requête n'est écrite
+> qu'une fois. Ce qui diffère, c'est le moment et ce que chacun en fait — ici la
+> question suit une synchronisation et enchaîne sur le rapport de validation ;
+> là-bas, c'est un geste isolé qui remet une ligne à jour.
+
+Le verrou posé à l'ouverture (ou à la création) retire l'unité aux autres
+équipes jusqu'à ce que quelqu'un la relâche. Une synchronisation est le moment
+naturel de poser la question : la saisie est partie, le technicien en a
+peut-être fini.
+
+```
+deltafile vidé  →  « Déverrouiller l'unité 02-12777-IPE ? »
+                        ├─ Déverrouiller      → POST …/deverrouiller/
+                        └─ Garder verrouillée
+                   puis, dans les deux cas : attente du rapport
+```
+
+L'ordre n'est pas indifférent. La question part **avant toute requête**, donc
+avant que la session ne réclame le mot de passe : lancer les deux ensemble
+ferait surgir la demande de mot de passe par-dessus le dialogue, et le
+technicien répondrait à deux questions superposées.
+
+Quelle unité ? Le nom du projet ne le dit pas — il est le même d'une unité à la
+suivante. C'est la **variable de projet `une_code_ident`**, que le serveur
+inscrit dans le `.qgs` livré, que le service lit. Un projet qui ne la porte pas
+(un projet qui n'a pas été préparé par les points d'accès IFA) ne déclenche
+aucune question : il n'y a rien à déverrouiller.
+
+Le déverrouillage est réservé au détenteur du verrou. Une unité tenue par
+quelqu'un d'autre ressort en `409`, et le message le nomme ; une unité qui
+n'était pas verrouillée n'est pas une erreur. Voir le §6 du README de
+`qfieldcloud.ifa`.
+
+L'échec du déverrouillage **n'interrompt pas** la suite : le rapport de
+validation s'obtient indépendamment. Le technicien en est averti — sans quoi il
+croirait avoir rendu son unité.
+
+---
+
+## 9. Bon à savoir
 
 **Recharger après modification.** QField ne contourne le cache QML que pour le
 fichier principal du plugin. Les composants voisins (`MenuPrincipal.qml`,
 `IfaPopup.qml`, …) sont chargés normalement : après les avoir modifiés,
 **relancer QField**. Désactiver/réactiver le plugin ne suffit pas toujours.
+
+**Un Popup créé au chargement du plugin n'a pas encore de fenêtre où
+s'afficher.** Un plugin d'application est chargé très tôt : `iface.mainWindow()`
+rend alors `null` — c'est la raison du réessai du bouton de barre d'outils dans
+`main.qml`. Un `parent: iface.mainWindow().contentItem` évalué à la
+construction reste donc nul **pour toujours** : `iface.mainWindow()` n'est pas
+une propriété, la liaison ne se réévalue jamais. `open()` ne montre alors rien,
+sans la moindre erreur — c'est exactement ce qui est arrivé à
+`DialogueDeverrouillage`. Résoudre la zone parente **juste avant** d'ouvrir,
+comme le font `IfaPopup.onAboutToShow` et
+`DialogueDeverrouillage.resoudreZoneParente()`.
 
 **Autorisation.** QField demande une autorisation au premier chargement d'un
 plugin. Elle est mémorisée par chemin d'installation : réinstaller ailleurs la
@@ -386,7 +814,7 @@ rester utilisables avec des gants.
 
 ---
 
-## 9. SessionCloud — parler au serveur
+## 10. SessionCloud — parler au serveur
 
 `SessionCloud.qml` porte l'URL du serveur, le jeton, et une seule fonction
 utile :

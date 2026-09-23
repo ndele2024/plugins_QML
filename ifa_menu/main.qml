@@ -99,6 +99,22 @@ Item {
           "fichier": "FenetreConsulterUE.qml"
         }
       ]
+    },
+    {
+      "id": "validation",
+      "titre": qsTr("Validation des données"),
+      "soustitre": qsTr("Conformité de ce qui a été synchronisé"),
+      "icone": "ic_check_white_24dp",
+      "accent": "mainColor",
+      "commandes": [
+        {
+          "id": "validation_rapport",
+          "titre": qsTr("Rapport de validation"),
+          "soustitre": qsTr("Anomalies relevées par le serveur"),
+          "icone": "ic_check_white_24dp",
+          "fichier": "FenetreValidation.qml"
+        }
+      ]
     }
   ]
 
@@ -121,11 +137,78 @@ Item {
   }
 
   // ===========================================================================
+  //  Validation des données synchronisées
+  // ===========================================================================
+  //  Le service vit ici, et non dans une fenêtre : il guette le fichier de
+  //  deltas de QField pour savoir quand une synchronisation part, ce qui doit
+  //  se faire que le menu soit ouvert ou non.
+  //
+  //  C'est l'ancien plugin autonome « Rapport IFE » (`plugin_event.qml`), fondu
+  //  dans celui-ci : un seul jeton, une seule demande de mot de passe.
+  ServiceValidation {
+    id: serviceValidation
+
+    session: sessionCloud
+    referentiels: donneesReferentiels
+
+    // Une synchronisation vient d'être acceptée par le serveur. Avant toute
+    // requête — et donc avant que la session ne réclame le mot de passe —, on
+    // demande au technicien s'il rend son unité.
+    onPousseDetecte: function (codeUnite) {
+      dialogueDeverrouillage.demander(codeUnite);
+    }
+
+    // Le verdict, à l'écran, sans avoir à ouvrir la fenêtre. Seulement pour le
+    // rapport qu'on guettait après une synchronisation : en annoncer un à
+    // chaque ouverture de projet ou à chaque « Rafraîchir » serait du bruit.
+    onRapportRecu: function (apresPousse) {
+      if (!apresPousse)
+        return;
+
+      if (!serviceValidation.rapport) {
+        plugin.avertir(qsTr("Rapport de validation reçu."));
+        return;
+      }
+
+      if (serviceValidation.rapport.is_valid) {
+        plugin.avertir(qsTr("Validation terminée : données conformes."), "success");
+        return;
+      }
+
+      plugin.avertir(qsTr("Validation terminée : %n anomalie(s) bloquante(s). Ouvrez le rapport.", "", serviceValidation.nombreErreurs), "warning");
+    }
+
+    onEchec: function (message) {
+      plugin.avertir(qsTr("Rapport de validation : %1").arg(message), "error");
+    }
+  }
+
+  //  La question du déverrouillage, et l'appel qui va avec. Le rapport de
+  //  validation n'est demandé qu'ensuite, quelle que soit la réponse : les
+  //  deux sont indépendants, mais les faire partir ensemble ferait surgir la
+  //  demande de mot de passe par-dessus le dialogue.
+  DialogueDeverrouillage {
+    id: dialogueDeverrouillage
+
+    session: sessionCloud
+
+    onTermine: function (deverrouille) {
+      serviceValidation.attendreRapportFrais();
+
+      // La fenêtre de validation n'est pas ouverte à ce moment-là : sans ce
+      // message, rien ne dirait au technicien que le serveur travaille pour
+      // lui. Le bouton de la barre d'outils bat, mais il faut le regarder.
+      plugin.avertir(qsTr("Modifications synchronisées — validation en cours sur le serveur…"));
+    }
+  }
+
+  // ===========================================================================
   //  Initialisation
   // ===========================================================================
   Component.onCompleted: {
     iface.logMessage("[IFA] plugin menu — chargement");
     iface.addItemToPluginsToolbar(boutonDemarrer);
+    iface.addItemToPluginsToolbar(boutonValidation);
     minuterieBarreOutils.start();
   }
 
@@ -141,7 +224,7 @@ Item {
     property int essais: 0
 
     onTriggered: {
-      if (boutonDemarrer.parent) {
+      if (boutonDemarrer.parent && boutonValidation.parent) {
         stop();
         return;
       }
@@ -151,7 +234,10 @@ Item {
         return;
       }
       essais++;
-      iface.addItemToPluginsToolbar(boutonDemarrer);
+      if (!boutonDemarrer.parent)
+        iface.addItemToPluginsToolbar(boutonDemarrer);
+      if (!boutonValidation.parent)
+        iface.addItemToPluginsToolbar(boutonValidation);
     }
   }
 
@@ -170,6 +256,73 @@ Item {
     ToolTip.text: qsTr("IFA 2.0 — Démarrer")
 
     onClicked: menuPrincipal.open()
+  }
+
+  // ===========================================================================
+  //  Bouton d'état de la validation
+  // ===========================================================================
+  //  Sa couleur est toute son utilité : vert, les données synchronisées sont
+  //  conformes ; rouge, elles ne le sont pas ; gris, l'affichage n'engage rien
+  //  — rapport absent, saisie non synchronisée, ou validation en cours. Un
+  //  technicien voit l'état sans ouvrir quoi que ce soit.
+  //
+  //  Tant qu'on attend le serveur, le bouton **clignote** : une icône qui
+  //  change sans bouger ne se remarque pas dans une barre d'outils, et l'attente
+  //  est justement le moment où le technicien a besoin de savoir qu'il se passe
+  //  quelque chose.
+  //
+  //  Le clignotement vient d'une minuterie qui bascule un booléen, et non d'une
+  //  animation. `QfToolButton` appartient à QField : ce qu'il fait de son
+  //  `opacity`, de son `scale` ou de son `rotation` ne nous appartient pas, et
+  //  une animation qu'il neutraliserait échouerait en silence — c'est ce qui
+  //  s'est produit. Une minuterie qui change une propriété liée, elle, ne peut
+  //  que repeindre.
+  property bool phaseAttente: false
+
+  Timer {
+    id: clignotantValidation
+
+    interval: 550
+    repeat: true
+    running: serviceValidation.attenteVisible
+
+    onTriggered: plugin.phaseAttente = !plugin.phaseAttente
+    onRunningChanged: {
+      if (!running)
+        plugin.phaseAttente = false;
+    }
+  }
+
+  QfToolButton {
+    id: boutonValidation
+
+    round: true
+    bgcolor: {
+      if (serviceValidation.attenteVisible)
+        return plugin.phaseAttente ? Theme.mainColor : Theme.secondaryTextColor;
+      if (serviceValidation.etat === "valide")
+        return Theme.goodColor;
+      if (serviceValidation.etat === "invalide")
+        return Theme.errorColor;
+      return Theme.secondaryTextColor;
+    }
+    iconSource: Theme.getThemeVectorIcon(serviceValidation.attenteVisible ? "ic_processing_black_24dp" : "ic_check_white_24dp")
+    iconColor: "white"
+
+    ToolTip.visible: hovered
+    ToolTip.text: {
+      if (serviceValidation.attenteVisible)
+        return serviceValidation.diagnostic !== "" ? serviceValidation.diagnostic : qsTr("Validation en cours…");
+      if (serviceValidation.deltasEnAttente)
+        return qsTr("Modifications non synchronisées");
+      if (serviceValidation.etat === "valide")
+        return qsTr("Données valides");
+      if (serviceValidation.etat === "invalide")
+        return qsTr("%n anomalie(s) bloquante(s)", "", serviceValidation.nombreErreurs);
+      return qsTr("Validation — aucun rapport à jour");
+    }
+
+    onClicked: plugin.ouvrirValidation()
   }
 
   // ===========================================================================
@@ -206,6 +359,7 @@ Item {
 
       item.referentiels = donneesReferentiels;
       item.session = sessionCloud;
+      item.validation = serviceValidation;
       item.open();
     }
 
@@ -242,6 +396,21 @@ Item {
     // autre : sans cela, réactiver la même commande ne relance pas onLoaded.
     chargeurFenetre.source = "";
     chargeurFenetre.source = commande.fichier;
+  }
+
+  // Le bouton d'état de la barre d'outils ouvre la même fenêtre que la
+  // commande du menu : le registre reste la seule définition de celle-ci.
+  function ouvrirValidation() {
+    for (let i = 0; i < sections.length; ++i) {
+      const commandes = sections[i].commandes;
+
+      for (let j = 0; j < commandes.length; ++j) {
+        if (commandes[j].id === "validation_rapport") {
+          ouvrirCommande(commandes[j]);
+          return;
+        }
+      }
+    }
   }
 
   function avertir(message, type) {

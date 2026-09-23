@@ -15,11 +15,21 @@
 //  ---------------------------------------------------------------------------
 //  CONTRAT
 //  ---------------------------------------------------------------------------
-//  Entrée — `rechercher(filtre)` où `filtre` vaut :
-//      { mode: "region",  valeur: "02" }
-//      { mode: "lce",     valeur: "12777" }
-//      { mode: "code",    valeur: "02-12777-IPE" }
-//      { mode: "emprise", wkt: "POLYGON((…))", bbox: [xmin, ymin, xmax, ymax] }
+//  Entrée — `rechercher(criteres)`, une liste de critères :
+//      [{ mode: "region",  valeur: "02" },
+//       { mode: "lce",     valeur: "12777" },
+//       { mode: "bassin",  valeur: "Saguenay" },
+//       { mode: "code",    valeur: "02-12777-IPE" },
+//       { mode: "emprise", wkt: "POLYGON((…))", bbox: [xmin, ymin, xmax, ymax] }]
+//
+//  Les critères se **croisent** : le serveur ne rend que les unités qui les
+//  satisfont tous. Chaque critère ajouté resserre la liste — c'est ce qu'on
+//  attend d'un formulaire de recherche, et c'est ce qui rend le décompte
+//  lisible. Un même mode n'est accepté qu'une fois : deux régions croisées ne
+//  rendraient jamais rien.
+//
+//  Un critère isolé (l'objet, hors de toute liste) est accepté tel quel : les
+//  fenêtres n'ont pas toutes à savoir qu'elles peuvent en envoyer plusieurs.
 //
 //  Sortie — signal `resultats(lignes)`, une ligne par unité :
 //      {
@@ -37,6 +47,7 @@
 //        rad_no:               "02",              // région du projet
 //        ing_no_plan_eau:      "12777",
 //        ing_nom_plan_eau:     "ILETS, LAC DES",
+//        ing_nom_bassi:        "SAGUENAY",        // bassin versant
 //        latitude:             48.196709,         // null si non localisée
 //        longitude:            -71.233353
 //      }
@@ -89,7 +100,8 @@ QtObject {
   // ---------------------------------------------------------------------------
   //  Interne
   // ---------------------------------------------------------------------------
-  property var filtreCourant: null
+  // Les critères de la recherche en cours, toujours sous forme de liste.
+  property var criteresCourants: []
   property var unitesRecues: []
 
   // Numéro de la recherche en cours. Une réponse dont le numéro ne correspond
@@ -100,19 +112,41 @@ QtObject {
   // ===========================================================================
   //  API publique
   // ===========================================================================
-  function rechercher(filtre) {
-    filtreCourant = filtre;
+  function rechercher(criteres) {
+    criteresCourants = normaliser(criteres);
     unitesRecues = [];
     total = 0;
     tronque = false;
     rechercheCourante++;
 
+    if (criteresCourants.length === 0) {
+      echec(qsTr("Aucun critère de recherche n'a été retenu."));
+      return;
+    }
+
     interroger(0);
+  }
+
+  // Accepte aussi bien une liste de critères qu'un critère isolé.
+  function normaliser(criteres) {
+    if (!criteres)
+      return [];
+
+    if (criteres.mode !== undefined)
+      return [criteres];
+
+    const retenus = [];
+    for (let i = 0; i < criteres.length; ++i) {
+      if (criteres[i] && criteres[i].mode)
+        retenus.push(criteres[i]);
+    }
+
+    return retenus;
   }
 
   // Demande la page suivante et cumule les résultats.
   function pageSuivante() {
-    if (enCours || !tronque || !filtreCourant)
+    if (enCours || !tronque || criteresCourants.length === 0)
       return;
 
     interroger(unitesRecues.length);
@@ -150,23 +184,38 @@ QtObject {
   }
 
   function corpsRequete(decalage) {
-    const filtre = filtreCourant;
+    const envoyes = [];
 
-    const corps = {
-      "mode": filtre.mode,
+    for (let i = 0; i < criteresCourants.length; ++i) {
+      envoyes.push(critereEnvoye(criteresCourants[i]));
+    }
+
+    return {
+      "criteres": envoyes,
       "limite": taillePage,
       "decalage": decalage
     };
+  }
 
-    if (filtre.mode === "emprise") {
-      corps.wkt = filtre.wkt;
-      if (filtre.bbox)
-        corps.bbox = filtre.bbox;
-    } else {
-      corps.valeur = "" + filtre.valeur;
+  // Un critère mis à la forme attendue par le serveur. L'emprise porte son
+  // polygone et sa boîte englobante ; tous les autres modes portent une valeur.
+  function critereEnvoye(critere) {
+    if (critere.mode === "emprise") {
+      const emprise = {
+        "mode": "emprise",
+        "wkt": critere.wkt
+      };
+
+      if (critere.bbox)
+        emprise.bbox = critere.bbox;
+
+      return emprise;
     }
 
-    return corps;
+    return {
+      "mode": critere.mode,
+      "valeur": "" + critere.valeur
+    };
   }
 
   function traiterReponse(donnees, decalage) {
