@@ -33,6 +33,8 @@
 //    ServiceUE.qml             recherche des UE sur le serveur
 //    PasseurProjet.qml         rapatrie et ouvre un projet QFieldCloud
 //    DialogueAttente.qml       fenêtre d'attente centrée pendant l'ouverture
+//    ServiceMiseAJour.qml      mise à jour du plugin depuis le serveur
+//    DialogueMiseAJour.qml     proposition de la nouvelle version
 //    Fenetre*.qml              une fenêtre par commande
 // =============================================================================
 
@@ -289,6 +291,73 @@ Item {
   // passeur, refermée par lui. Ici pour survivre à la fenêtre qui l'a ouverte.
   DialogueAttente {
     id: dialogueAttente
+  }
+
+  // ===========================================================================
+  //  Mise à jour du plugin
+  // ===========================================================================
+  //  Au démarrage, compare la version installée à celle que le serveur publie
+  //  (page d'administration « Plugin QField IFA »), et propose la nouvelle.
+  //  Voir ServiceMiseAJour.qml — notamment pourquoi la réactivation se fait
+  //  dans `installEnded`, et jamais plus tard.
+  ServiceMiseAJour {
+    id: serviceMiseAJour
+
+    session: sessionCloud
+
+    onMiseAJourDisponible: function (installee, publiee) {
+      plugin.miseAJourEnAttente = true;
+      plugin.proposerMiseAJour();
+    }
+
+    onProgression: function (message) {
+      dialogueAttente.suivre(qsTr("Mise à jour du plugin"), message);
+    }
+
+    // Ce plugin est en train d'être remplacé : le toast est affiché par la
+    // fenêtre principale de QField et survit à son déchargement.
+    onInstallee: function (version) {
+      plugin.avertir(qsTr("Plugin IFA 2.0 mis à jour en version %1.").arg(version), "success");
+    }
+
+    onEchec: function (message) {
+      dialogueAttente.terminer();
+      plugin.avertir(message, "error");
+    }
+  }
+
+  DialogueMiseAJour {
+    id: dialogueMiseAJour
+
+    onAccepte: serviceMiseAJour.installer()
+  }
+
+  // Une proposition qui tomberait au milieu d'une ouverture de projet ou de
+  // l'attente d'un rapport recouvrirait ce qui se passe — et installer
+  // rechargerait le plugin en plein travail. Elle attend donc le calme.
+  property bool miseAJourEnAttente: false
+
+  readonly property bool occupe: passeurProjet.enCours || serviceValidation.attenteRapport || dialogueDeverrouillage.opened || dialogueAttente.opened || dialogueAttenteValidation.opened
+
+  function proposerMiseAJour() {
+    if (!miseAJourEnAttente)
+      return;
+
+    if (occupe) {
+      minuterieMiseAJour.restart();
+      return;
+    }
+
+    miseAJourEnAttente = false;
+    dialogueMiseAJour.proposer(serviceMiseAJour.versionInstallee, serviceMiseAJour.versionPubliee);
+  }
+
+  Timer {
+    id: minuterieMiseAJour
+
+    interval: 10000
+    repeat: false
+    onTriggered: plugin.proposerMiseAJour()
   }
 
   // ===========================================================================

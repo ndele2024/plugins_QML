@@ -40,8 +40,10 @@ IFA 2.0
 | `DialogueDeverrouillage.qml` | Après une synchronisation : rendre l'unité, ou la garder — voir §8. |
 | `DialogueRaisonVerrou.qml` | Saisie du motif du verrouillage, avec motifs suggérés. |
 | `PasseurProjet.qml` | Télécharge le projet préparé par le serveur et l'ouvre à la place du projet courant — voir §6. |
-| `DialogueAttente.qml` | Fenêtre d'attente centrée, du clic jusqu'à l'ouverture du projet — voir §6. |
+| `DialogueAttente.qml` | Fenêtre d'attente centrée. Deux instances : ouverture d'un projet (§6), attente du rapport après un push (§8). |
 | `DialogueProjetPret.qml` | Repli quand l'ouverture automatique échoue : le nom du projet, à ouvrir depuis l'écran « Projets » — voir §6. |
+| `ServiceMiseAJour.qml` | Compare la version installée à celle publiée par le serveur, et installe la nouvelle — voir §2. |
+| `DialogueMiseAJour.qml` | Propose la nouvelle version (« Plus tard » / « Installer ») — voir §2. |
 | `TableauUE.qml` | Liste des unités : tableau sur grand écran, fiches sur téléphone. |
 | `ExplorateurProjets.qml` | Parcours de `cloud_projects` sur le disque. **Sans appelant aujourd'hui** : conservé pour ce qu'il sait de l'arborescence des projets. |
 | `EtiquetteVerrou.qml` | Pastille d'état de verrouillage d'une UE. |
@@ -88,6 +90,50 @@ python install.py --zip
 
 Produit `ifa_menu.zip`, installable depuis une URL (Réglages → Plugins), ou à
 distance via `pluginManager.installFromUrl()`.
+
+### Distribuer et mettre à jour les appareils — par le serveur
+
+Le serveur QFieldCloud publie **la** version courante du plugin, déposée par
+la page d'administration **« Plugin QField IFA »** (menu du haut de l'admin),
+à deux adresses publiques :
+
+```
+https://<serveur>/api/v1/ifa/plugin/metadata.txt    version publiée
+https://<serveur>/api/v1/ifa/plugin/ifa_menu.zip    archive
+```
+
+**Publier une modification :**
+
+1. augmenter `version=` dans `metadata.txt` — c'est la seule chose que les
+   appareils comparent ;
+2. `python install.py --zip` ;
+3. dans l'admin, « Plugin QField IFA » : déposer `ifa_menu.zip` et
+   `metadata.txt`. La page refuse une archive sans `main.qml`, deux versions
+   qui ne concordent pas, ou une version qui n'avance pas (sauf « Publier
+   quand même », pour revenir en arrière).
+
+**Première installation sur un appareil :** Réglages → Plugins → installer
+depuis une URL, avec l'adresse de l'archive, puis activer le plugin. Le
+nom du fichier compte : QField nomme le dossier du plugin — son identifiant —
+d'après lui, et `ifa_menu` est celui qu'attend la mise à jour.
+
+**Ensuite, tout seul.** Au démarrage, `ServiceMiseAJour` lit `metadata.txt` sur
+le serveur de la connexion QFieldCloud de QField, compare, et — si la version
+publiée est plus récente — `DialogueMiseAJour` la propose. Jamais pendant une
+ouverture de projet ni l'attente d'un rapport : la proposition attend le
+calme. « Plus tard » ne revient qu'au prochain démarrage.
+
+**Le piège de l'auto-mise à jour.** `pluginManager.installFromUrl()`
+**désactive** le plugin qu'il remplace, et ne le réactive pas. Le service le
+réactive lui-même (`enableAppPlugin`) dans le gestionnaire de `installEnded` :
+QField décharge le plugin par `deleteLater()` et émet `installEnded` dans la
+même fonction, le service est donc encore en vie à ce moment-là — et seulement
+à ce moment-là. Aucun `Qt.callLater` dans ce chemin. Si QField avait demandé
+l'autorisation « pour cette fois » seulement au premier chargement, il la
+redemandera.
+
+Le journal trace tout sous `[IFA] mise a jour` / `[IFA] plugin installe …,
+publie …`. Côté serveur, voir `qfieldcloud/ifa/plugin.py`.
 
 ---
 
@@ -734,21 +780,39 @@ deux plugins se les disputaient (voir §10).
 | `ServiceValidation.qml` | Guette les synchronisations, va chercher le rapport. Vit dans `main.qml`. |
 | `FenetreValidation.qml` | Affiche le verdict, les compteurs et les anomalies. |
 | `DialogueDeverrouillage.qml` | Après un push : rendre l'unité, ou la garder. |
+| `DialogueAttente.qml` | Seconde instance, dans `main.qml` : l'attente du rapport après un push. |
 
 Deux points d'entrée : la commande **Validation → Rapport de validation** du
 menu, et un **second bouton dans la barre d'outils** dont la couleur donne
 l'état sans rien ouvrir — vert (données conformes), rouge (anomalies
 bloquantes), gris (l'affichage n'engage rien).
 
-### L'événement, c'est un fichier local
+### L'événement, ce sont les signaux de QField
 
 Aucune horloge n'interroge le serveur. L'état ne peut changer qu'à l'ouverture
 du projet, au push, ou sur rafraîchissement manuel — et une requête n'est émise
 qu'à ces moments-là. Au repos, le plugin ne parle pas au serveur.
 
-La seule horloge qui tourne lit `deltafile.json`, que QField écrit à chaque
-saisie et **vide** quand le serveur a accepté le push. Ni connexion ni poignée
-de main TLS : c'est cette lecture, toutes les 400 ms, qui sert d'événement.
+Le push et les modifications en attente sont connus par deux API de QField,
+atteintes par `iface.findItemByObjectName("cloudProjectsModel")` et vérifiées
+dans les en-têtes installés (v4.2.11) :
+
+| API | Sert à |
+|---|---|
+| signal `pushFinished(projectId, isDownloadingProject, hasError, errorString)` | déclencher la suite — question du déverrouillage, puis attente du rapport. Seul un push **réussi** du **projet ouvert** compte. |
+| `layerObserver.deltaFileWrapper.count` (notifié par `countChanged`) | `deltasEnAttente` — le bouton gris « Modifications non synchronisées », et le refus d'ouvrir un autre projet (§6). |
+
+Un second push pendant l'attente du rapport ne repose pas la question.
+
+> **Pourquoi plus de fichier.** La première version lisait `deltafile.json`
+> toutes les 400 ms par `XMLHttpRequest` sur une URL `file://`, et guettait
+> l'instant où QField le vide. Sur le terrain, des pushes sont passés sans que
+> rien ne se déclenche — ni question, ni rapport, qu'il fallait aller
+> rafraîchir à la main — sans la moindre trace dans le journal : Qt peut
+> refuser ces lectures de fichiers en silence. Cette lecture ne sert plus que
+> **de secours**, si le modèle de QField est introuvable. Le journal dit au
+> démarrage laquelle des deux est active :
+> `[IFA] detection du push : signaux de QField` ou `… (secours)`.
 
 Le serveur ne rappelle jamais le plugin, et la validation se déroule *après* la
 réponse HTTP du push : une requête unique arriverait trop tôt. Le service tire
@@ -768,25 +832,31 @@ attendue — c'est le technicien qui vient d'agir.
 
 > L'ancien plugin autonome `formulaires/plugins/plugin_event.qml` fait
 > double emploi avec tout ceci. Le laisser installé à côté ferait deux boutons
-> dans la barre d'outils, deux sondages du même fichier, et deux jetons qui
+> dans la barre d'outils, deux détections du même push, et deux jetons qui
 > s'expirent mutuellement (voir §10) : il est à désactiver.
 
 ### Ce que montre l'interface pendant l'attente
 
 Le serveur peut mettre trente secondes à produire son rapport. Rien ne doit
-laisser croire, pendant ce temps, que le plugin est figé — trois endroits le
-disent donc ensemble :
+laisser croire, pendant ce temps, que le plugin est figé :
 
 | Où | Quoi |
 |---|---|
+| **Fenêtre d'attente centrée** | « Validation des données », une roue, l'étape en cours (« Push accepté — attente du rapport… », « Validation en cours côté serveur… »). Ouverte quand `attenteRapport` se lève, refermée quand il retombe. |
 | Bouton de la barre d'outils | Il **clignote** entre gris et couleur d'accent, avec l'étape en infobulle. |
 | Fenêtre « Rapport de validation » | Le bandeau épinglé d'`IfaPopup` — roue qui tourne et texte d'étape. Le bouton devient « Interrogation… ». |
-| Notifications | « Modifications synchronisées — validation en cours… », puis le verdict à l'arrivée. |
+| Notifications | Le verdict à l'arrivée ; ou, si le rapport ne vient pas dans la minute, l'invitation à « Rafraîchir ». |
 
-Les notifications ne sont pas un luxe : après un push, la fenêtre de validation
-n'est pas ouverte, et le bandeau ne se voit donc pas. Le verdict n'est annoncé
-que pour le rapport **qu'on guettait** ; en annoncer un à chaque ouverture de
-projet ou à chaque « Rafraîchir » serait du bruit.
+La fenêtre d'attente est une **seconde instance** de `DialogueAttente` (§6),
+distincte de celle du passeur : les deux attentes ne se gênent jamais. Elle
+s'ouvre **après** la question du déverrouillage — elle la recouvrirait sinon —
+et n'a pas de bouton : les tentatives s'arrêtent d'elles-mêmes au bout d'une
+minute environ (2 + 4 + 8 + 15 + 30 s). Sa fermeture sans verdict est
+signalée par une notification, sans quoi elle passerait pour un rapport
+arrivé.
+
+Le verdict n'est annoncé que pour le rapport **qu'on guettait** ; en annoncer
+un à chaque ouverture de projet ou à chaque « Rafraîchir » serait du bruit.
 
 > **Le clignotement vient d'une minuterie, pas d'une animation.** Une
 > `SequentialAnimation on opacity` posée sur le `QfToolButton` n'a rien donné à
@@ -821,10 +891,10 @@ naturel de poser la question : la saisie est partie, le technicien en a
 peut-être fini.
 
 ```
-deltafile vidé  →  « Déverrouiller l'unité 02-12777-IPE ? »
-                        ├─ Déverrouiller      → POST …/deverrouiller/
-                        └─ Garder verrouillée
-                   puis, dans les deux cas : attente du rapport
+pushFinished  →  « Déverrouiller l'unité 02-12777-IPE ? »
+                      ├─ Déverrouiller      → POST …/deverrouiller/
+                      └─ Garder verrouillée
+                 puis, dans les deux cas : fenêtre d'attente, jusqu'au rapport
 ```
 
 L'ordre n'est pas indifférent. La question part **avant toute requête**, donc
@@ -873,8 +943,13 @@ plugin. Elle est mémorisée par chemin d'installation : réinstaller ailleurs l
 redemande.
 
 **API non documentée.** `iface.findItemByObjectName()` sert à atteindre
-`dashBoard`, `overlayFeatureFormDrawer`, `positionSource` et, pour
-`PasseurProjet`, `cloudProjectsModel` et `cloudConnection`. Ces noms ne font pas
+`dashBoard`, `overlayFeatureFormDrawer`, `positionSource` et
+`cloudConnection`, ainsi que `cloudProjectsModel` — pour `PasseurProjet`
+(`appendProject`, `projectPackageAndDownload`, `findProject`) et pour
+`ServiceValidation` (`pushFinished`, `layerObserver.deltaFileWrapper.count`).
+`ServiceMiseAJour` utilise en outre la propriété de contexte `pluginManager`
+(`installFromUrl`, `enableAppPlugin`, `availableAppPlugins`, `pluginModel`,
+signal `installEnded`). Ces noms ne font pas
 partie de l'API publique des plugins : une mise à jour de QField peut les
 renommer. Tous les appels sont donc gardés et signalent un message clair plutôt
 que de planter — le passeur vérifie aussi que chaque méthode appelée existe

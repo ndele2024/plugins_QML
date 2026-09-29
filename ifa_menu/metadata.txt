@@ -1,6 +1,6 @@
 name=IFA 2.0 — Menu
 description=Point d'entrée du programme IFA 2.0 : gestionnaire de projet et gestionnaire d'unité d'échantillonnage.
 author=Direction de la gestion de la faune aquatique
-version=0.1.0
+version=0.2.1
 homepage=
 icon=icon.svg
