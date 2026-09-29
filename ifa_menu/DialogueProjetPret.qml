@@ -1,9 +1,13 @@
 // =============================================================================
 //  DialogueProjetPret — le projet à ouvrir, nommé, et qui reste à l'écran
 // =============================================================================
-//  Dernier geste des deux parcours « Créer une UE » et « Consulter une UE » :
-//  le serveur a préparé un projet, QField ne l'ouvre pas de lui-même, et c'est
-//  au technicien d'aller le chercher dans l'écran « Projets ».
+//  Repli des deux parcours « Créer une UE » et « Consulter une UE » : le
+//  serveur a préparé un projet, mais `PasseurProjet` n'a pas pu l'ouvrir tout
+//  seul (QField déconnecté, téléchargement en échec, packaging trop long…).
+//  C'est alors au technicien d'aller le chercher dans l'écran « Projets ».
+//
+//  Une seule instance, dans `main.qml`, alimentée par le signal
+//  `ouvertureImpossible` du passeur.
 //
 //  ---------------------------------------------------------------------------
 //  POURQUOI PAS UN TOAST
@@ -34,18 +38,16 @@
 //  USAGE
 //  ---------------------------------------------------------------------------
 //      DialogueProjetPret {
-//        id: dialogueProjet
-//        zoneParente: fenetre.zoneUtile
-//        accent: fenetre.accent
+//        id: dialogueProjetGlobal
+//        accent: Theme.cloudColor
 //      }
 //
-//      dialogueProjet.annoncer(nomProjet, qsTr("Unité 02-12777-IPE créée."));
-//      dialogueProjet.annoncer(nomProjet, texte, false);   // paquet en cours
+//      dialogueProjetGlobal.annoncer(nomProjet, qsTr("Unité 02-12777-IPE créée."));
+//      dialogueProjetGlobal.annoncer(nomProjet, texte, false);   // paquet en cours
 //
-//  ⚠️ `zoneParente` doit être la zone utile de la fenêtre hôte (le
-//  `contentItem` de la fenêtre principale de QField), jamais la fenêtre du
-//  plugin elle-même : « Créer une UE » se referme au moment où le projet est
-//  prêt, et un dialogue posé dans cette fenêtre disparaîtrait avec elle.
+//  ⚠️ `zoneParente` doit être le `contentItem` de la fenêtre principale de
+//  QField, résolu juste avant `annoncer()` — jamais à la construction, ni la
+//  fenêtre du plugin : celle-ci peut s'être refermée entre-temps.
 // =============================================================================
 
 import QtQuick

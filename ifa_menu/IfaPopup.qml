@@ -63,6 +63,15 @@ Popup {
   // « Validation », mais il s'injecte comme les autres.
   property var validation: null
 
+  // Rapatriement et ouverture automatique d'un projet QFieldCloud, injecté par
+  // main.qml (PasseurProjet.qml). Il vit hors des fenêtres : l'ouverture d'un
+  // projet peut survivre à celle qui l'a demandée.
+  property var passeur: null
+
+  // Fenêtre d'attente centrée, injectée par main.qml (DialogueAttente.qml).
+  // Elle survit à la fermeture de la fenêtre qui l'a ouverte.
+  property var attente: null
+
   // Contenu principal de la fenêtre.
   default property alias contenu: colonne.data
 

@@ -14,10 +14,16 @@
 //  requête n'est émise qu'à ces moments-là ; au repos, le service ne parle pas
 //  au serveur.
 //
-//  La seule horloge qui tourne lit un **fichier local** — `deltafile.json`,
-//  que QField écrit à chaque saisie et vide quand le serveur a accepté le
-//  push. Ni connexion ni poignée de main TLS : c'est cette lecture, toutes les
-//  400 ms, qui sert d'événement.
+//  Le push est connu par le signal **`pushFinished`** de `cloudProjectsModel`,
+//  et les modifications en attente par `layerObserver.deltaFileWrapper.count`
+//  — deux API de QField (Q_PROPERTY / signal, vérifiés dans les en-têtes
+//  v4.2.11), atteintes par `iface.findItemByObjectName`.
+//
+//  **Secours seulement** : la lecture de `deltafile.json` toutes les 400 ms,
+//  que QField vide quand le serveur a accepté le push. C'était le seul
+//  mécanisme ; il a manqué des pushes sur le terrain sans laisser de trace —
+//  `XMLHttpRequest` sur une URL `file://` peut être refusé par Qt en silence.
+//  Il ne sert plus que si le modèle est introuvable.
 //
 //  ---------------------------------------------------------------------------
 //  POURQUOI UNE SÉQUENCE DE TENTATIVES APRÈS LE PUSH
@@ -217,19 +223,90 @@ Item {
   property bool requeteEnCours: false
   property bool lectureDeltaEnCours: false
 
+  // ---------------------------------------------------------------------------
+  //  Les signaux natifs de QField
+  // ---------------------------------------------------------------------------
+  //  Résolu à la volée, pas à la construction : le plugin d'application est
+  //  chargé avant que l'interface de QField soit complète.
+  property QtObject modeleCloud: null
+
+  // Le compteur de modifications en attente du projet ouvert, ou null.
+  readonly property QtObject deltasNatifs: modeleCloud && modeleCloud.layerObserver && modeleCloud.layerObserver.deltaFileWrapper ? modeleCloud.layerObserver.deltaFileWrapper : null
+
+  readonly property bool detectionNative: deltasNatifs !== null
+
+  // Changer de projet change de compteur : relire sa valeur tout de suite.
+  onDeltasNatifsChanged: {
+    if (deltasNatifs)
+      deltasEnAttente = deltasNatifs.count > 0;
+  }
+
+  onDetectionNativeChanged: iface.logMessage("[IFA] detection du push : " + (detectionNative ? "signaux de QField" : "lecture de deltafile.json (secours)"))
+
+  Connections {
+    target: service.deltasNatifs
+    ignoreUnknownSignals: true
+
+    function onCountChanged() {
+      service.deltasEnAttente = service.deltasNatifs.count > 0;
+    }
+  }
+
+  Connections {
+    target: service.modeleCloud
+    ignoreUnknownSignals: true
+
+    // Le push est terminé, accepté ou non. Seul un push réussi du projet
+    // ouvert déclenche la suite.
+    function onPushFinished(projectId, isDownloadingProject, hasError, errorString) {
+      if (projectId !== service.projetId)
+        return;
+
+      if (hasError) {
+        iface.logMessage("[IFA] push en echec : " + errorString);
+        return;
+      }
+
+      service.signalerPousse("signal pushFinished");
+    }
+  }
+
+  function resoudreModeleCloud() {
+    if (modeleCloud)
+      return;
+
+    try {
+      modeleCloud = iface.findItemByObjectName("cloudProjectsModel");
+    } catch (e) {
+      modeleCloud = null;
+    }
+
+    if (deltasNatifs)
+      deltasEnAttente = deltasNatifs.count > 0;
+  }
+
   Component.onCompleted: {
-    lireDeltafile();
+    resoudreModeleCloud();
+    sonderDeltas();
     demanderRapportSiPossible();
     minuterieDelta.start();
   }
 
-  // Lecture du fichier local. Seule horloge du service.
+  // Tant que le modèle n'est pas trouvé : on le recherche, et on lit le
+  // fichier en secours. Une fois trouvé, cette horloge ne fait plus rien.
   Timer {
     id: minuterieDelta
 
     interval: 400
     repeat: true
-    onTriggered: service.lireDeltafile()
+    onTriggered: service.sonderDeltas()
+  }
+
+  function sonderDeltas() {
+    resoudreModeleCloud();
+
+    if (!detectionNative)
+      lireDeltafile();
   }
 
   Timer {
@@ -352,16 +429,25 @@ Item {
     // l'événement, obtenu sans la moindre requête.
     if (deltasVus) {
       deltasVus = false;
-
-      const code = codeUnite();
-
-      // Tracé : c'est le seul endroit d'où part toute la suite (question du
-      // déverrouillage, puis attente du rapport). Quand rien ne se passe après
-      // une synchronisation, c'est ici qu'il faut regarder.
-      iface.logMessage("[IFA] push detecte — unite « " + code + " »");
-
-      pousseDetecte(code);
+      signalerPousse("deltafile.json vide");
     }
+  }
+
+  // Seul endroit d'où part toute la suite (question du déverrouillage, puis
+  // attente du rapport), quelle que soit la façon dont le push a été vu.
+  // Quand rien ne se passe après une synchronisation, c'est la ligne de
+  // journal à chercher.
+  function signalerPousse(source) {
+    // Un rapport est déjà guetté : un second push pendant l'attente ne doit
+    // pas reposer la question.
+    if (attenteRapport)
+      return;
+
+    const code = codeUnite();
+
+    iface.logMessage("[IFA] push detecte (" + source + ") — unite « " + code + " »");
+
+    pousseDetecte(code);
   }
 
   // ===========================================================================

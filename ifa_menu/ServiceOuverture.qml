@@ -27,12 +27,10 @@
 //  2. Le service interroge ensuite `GET /api/v1/jobs/<id>/` jusqu'à ce que ce
 //     travail soit terminé — le packaging tourne dans un conteneur QGIS, il
 //     prend de quelques secondes à quelques minutes.
-//  3. Le projet est enfin proposé au téléchargement dans QField.
-//
-//  L'étape 3 passe par `CloudProjectsModel`, que QField n'expose pas
-//  officiellement à ses greffons : si l'objet n'est pas atteignable, le service
-//  signale simplement le nom du projet à ouvrir depuis l'écran « Projets ».
-//  L'unité est prête dans tous les cas — seul le dernier geste reste manuel.
+//  3. Le projet est remis à `PasseurProjet` (main.qml), qui le télécharge et
+//     l'ouvre à la place du projet courant — ou, s'il n'y parvient pas, nomme
+//     le projet à ouvrir depuis l'écran « Projets ». L'unité est prête dans
+//     tous les cas.
 // =============================================================================
 
 import QtQuick
@@ -46,6 +44,10 @@ QtObject {
   //  Dépendances injectées
   // ---------------------------------------------------------------------------
   property var session: null
+
+  // Rapatrie et ouvre le projet préparé (PasseurProjet.qml), ou l'annonce
+  // pour une ouverture manuelle s'il n'y parvient pas.
+  property var passeur: null
 
   // ---------------------------------------------------------------------------
   //  État
@@ -68,11 +70,8 @@ QtObject {
   // recherche.
   property var uniteVerrou: null
 
-  // Prêt à être ouvert dans QField.
+  // Packagé, et remis au passeur pour le téléchargement et l'ouverture.
   signal pret(var infos)
-
-  // Le projet est préparé mais QField n'a pas pu l'ouvrir tout seul.
-  signal ouvertureManuelle(string nomProjet)
 
   signal progression(string message)
   signal echec(string message)
@@ -103,7 +102,7 @@ QtObject {
   //  `mode`   "modifiable" ou "consultation".
   //  `raison` motif du verrouillage — exigé en mode modifiable, ignoré sinon.
   function ouvrir(unite, mode, raison) {
-    if (!session) {
+    if (!session || !passeur) {
       echec(qsTr("Le service d'ouverture n'est pas relié à la session QFieldCloud."));
       return;
     }
@@ -240,55 +239,11 @@ QtObject {
     enCours = false;
     pret(infos);
 
-    if (!telecharger(projetId))
-      ouvertureManuelle(projetNom);
-  }
-
-  // Demande à QField de rapatrier puis d'ouvrir le projet.
-  //
-  // `CloudProjectsModel` ne fait pas partie de l'API des greffons : les noms
-  // essayés ici sont ceux qu'emploie l'application, et une version qui ne les
-  // expose pas fait simplement retomber sur l'ouverture manuelle.
-  function telecharger(identifiant) {
-    const modele = resoudreModeleProjets();
-
-    if (!modele)
-      return false;
-
-    try {
-      if (typeof modele.refreshProjectsList === "function")
-        modele.refreshProjectsList();
-
-      if (typeof modele.downloadProject === "function") {
-        modele.downloadProject(identifiant);
-        return true;
-      }
-
-      if (typeof modele.projectDownload === "function") {
-        modele.projectDownload(identifiant);
-        return true;
-      }
-    } catch (e) {
-      iface.logMessage("[IFA] telechargement automatique impossible : " + e);
-    }
-
-    return false;
-  }
-
-  function resoudreModeleProjets() {
-    const noms = ["cloudProjectsModel", "CloudProjectsModel", "cloudProjects"];
-
-    for (let i = 0; i < noms.length; ++i) {
-      try {
-        const objet = iface.findItemByObjectName(noms[i]);
-        if (objet)
-          return objet;
-      } catch (e) {
-        // Nom inconnu de cette version de QField : on essaie le suivant.
-      }
-    }
-
-    return null;
+    // Le passeur télécharge et ouvre le projet ; s'il n'y parvient pas, il
+    // l'annonce lui-même pour une ouverture manuelle (dialogue « Projet prêt à
+    // ouvrir », dans main.qml). Le verrou, lui, est déjà posé et le reste.
+    const contexte = modeCourant === "modifiable" ? qsTr("L'unité %1 est verrouillée à votre nom.").arg(uniteCourante) : qsTr("L'unité %1 est prête en consultation.").arg(uniteCourante);
+    passeur.demander(projetId, projetNom, contexte);
   }
 
   // ===========================================================================

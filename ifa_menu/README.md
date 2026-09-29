@@ -39,7 +39,9 @@ IFA 2.0
 | `FenetreValidation.qml` | Verdict, compteurs et anomalies du rapport — voir §8. |
 | `DialogueDeverrouillage.qml` | Après une synchronisation : rendre l'unité, ou la garder — voir §8. |
 | `DialogueRaisonVerrou.qml` | Saisie du motif du verrouillage, avec motifs suggérés. |
-| `DialogueProjetPret.qml` | Le nom du projet préparé, à ouvrir depuis l'écran « Projets » — dialogue persistant, voir §6. |
+| `PasseurProjet.qml` | Télécharge le projet préparé par le serveur et l'ouvre à la place du projet courant — voir §6. |
+| `DialogueAttente.qml` | Fenêtre d'attente centrée, du clic jusqu'à l'ouverture du projet — voir §6. |
+| `DialogueProjetPret.qml` | Repli quand l'ouverture automatique échoue : le nom du projet, à ouvrir depuis l'écran « Projets » — voir §6. |
 | `TableauUE.qml` | Liste des unités : tableau sur grand écran, fiches sur téléphone. |
 | `ExplorateurProjets.qml` | Parcours de `cloud_projects` sur le disque. **Sans appelant aujourd'hui** : conservé pour ce qu'il sait de l'arborescence des projets. |
 | `EtiquetteVerrou.qml` | Pastille d'état de verrouillage d'une UE. |
@@ -145,6 +147,8 @@ Ajouter un **menu** entier suit la même logique : une entrée de plus dans
 | `referentiels` | Injecté automatiquement — voir §4. |
 | `session` | Injectée automatiquement — appels authentifiés au serveur, voir §10. |
 | `validation` | Injecté automatiquement — suivi de la validation, voir §8. |
+| `passeur` | Injecté automatiquement — téléchargement et ouverture d'un projet QFieldCloud, voir §6. |
+| `attente` | Injectée automatiquement — la fenêtre d'attente centrée, voir §6. |
 | `avertir(message, type)` | Notification QField. `type` : `"info"`, `"warning"`, `"error"`. |
 | `compact` | `true` sur écran étroit (< 520 px), pour adapter la mise en page. |
 | `accent`, `surAccent` | Couleur d'accent et couleur de texte contrastée correspondante. |
@@ -200,15 +204,17 @@ reste désactivé.
 ## 6. Créer une UE : le projet de saisie
 
 Un appui sur « Créer » ne remplit plus le projet ouvert. Il inscrit l'unité dans
-la base, demande au serveur le projet `formulaire_UE_IFA` de l'utilisateur, et
-le signale une fois prêt :
+la base, demande au serveur le projet `formulaire_UE_IFA` de l'utilisateur, puis
+le télécharge et l'ouvre à la place du projet courant :
 
 ```
+PasseurProjet.verifier()                  FenetreCreerUE  (avant tout appel)
+      ↓  QField connecté, aucune modification en attente
 POST /api/v1/ifa/formulaire/preparer/     ServiceFormulaire
       ↓  le serveur crée l'UE, clone le modèle, remplit le GeoPackage, package
 GET  /api/v1/jobs/<id>/  (sondage)        ServiceFormulaire
       ↓  packaging terminé
-téléchargement demandé · projet nommé     ServiceFormulaire
+téléchargement · ouverture                PasseurProjet
 ```
 
 ### L'unité est créée et verrouillée tout de suite
@@ -336,65 +342,123 @@ valeurs par défaut du formulaire QGIS les lisent. Ce n'est plus lui qui recevra
 la saisie : elles voyagent donc dans le corps de la requête (`variables`), et le
 serveur les inscrit dans le `.qgs` livré.
 
-### Le dernier geste reste manuel
+### Ouverture automatique — `PasseurProjet`
 
-Une fois le packaging terminé, le service demande le téléchargement à
-`QFieldCloudProjectsModel` puis **nomme le projet à ouvrir**. Rien n'est fermé,
-rien n'est remplacé : le technicien garde son projet à l'écran et ouvre le
-nouveau depuis « Projets » quand il le décide. C'est exactement ce que fait
-`ServiceOuverture` après l'ouverture d'une UE.
+Une fois le packaging terminé, le projet est remis à `PasseurProjet`, qui le
+télécharge et l'**ouvre à la place du projet courant**. « Consulter une UE »
+s'en sert aussi (§7) : c'est le même composant, instancié **une seule fois dans
+`main.qml`** et injecté dans les fenêtres (`fenetre.passeur`).
 
-Ce nom est annoncé dans un **dialogue modal** (`DialogueProjetPret`), pas dans
-un toast. Un toast s'efface au bout de quelques secondes, et il arrive au moment
-précis où la fenêtre « Créer une UE » se referme et où la carte réapparaît —
-c'est-à-dire là où le regard n'est pas. Le nom du projet se perdait, et c'est la
-seule prise pour retrouver son travail dans la liste. Le dialogue ne part que
-sur « J'ai compris » ; le nom y est détaché du texte, dans son propre cadre.
+Il applique la recette que QField suit lui-même pour un projet qu'il vient de
+créer (`QfCloudScreen.qml`) :
 
-Il connaît deux états. Quand le packaging est terminé, il annonce un projet
-**prêt**. Quand l'attente a expiré côté plugin — `sondagesMax` dépassé, le
-serveur travaille encore —, il le dit et invite à rafraîchir la liste dans
-quelques minutes. Promettre un projet absent de l'écran « Projets » enverrait le
-technicien chercher pour rien. C'est pourquoi `ServiceFormulaire.ouvertureManuelle`
-porte un second argument, `paquetPret` : `ServiceOuverture` n'en a pas besoin,
-lui n'émet ce signal qu'une fois le paquet fait.
+```
+cloudProjectsModel.appendProject(id, true)
+      ↓  projectAppended(projectId, hasError, errorString)
+cloudProjectsModel.projectPackageAndDownload(id)
+      ↓  projectDownloaded(projectId, projectName, projectOwner, hasError, errorString)
+Qt.callLater → iface.loadFile(projet.localPath, projet.name)
+```
 
-Le dialogue est rattaché à `fenetre.zoneUtile` et non à la fenêtre du plugin :
-« Créer une UE » se referme sur `onPret`, au moment même où le projet devient
-disponible, et un dialogue posé dans cette fenêtre disparaîtrait avec elle.
+* **`appendProject` n'est pas facultatif.** `projectPackageAndDownload` ignore
+  sans rien dire un projet absent du modèle, et un projet que le serveur vient
+  de créer n'y est pas encore.
+* **`cloudProjectsModel` et `cloudConnection` sont atteignables** par
+  `iface.findItemByObjectName()` : QField leur pose un `objectName` dans
+  `qgismobileapp.qml` (vérifié en v4.2.11 et en master), et la recherche porte
+  sur n'importe quel `QObject`. Une version précédente de ce README affirmait
+  le contraire : c'était faux. L'échec d'alors venait de noms de méthodes
+  inventés (`downloadProject`, `projectDownload`) dans l'ancien
+  `telecharger()`, aujourd'hui supprimé.
+* **`loadFile()` est différé** par `Qt.callLater` : il démonte le projet
+  courant, et l'appeler dans la pile du signal du modèle détruirait le contexte
+  de l'émetteur pendant qu'il émet.
+* **Le signal `warning` du modèle est écouté.** Certains refus (« Project
+  busy. ») ne passent que par lui : sans cela, l'attente serait éternelle.
+* **Chaque étape a sa borne** : 20 s pour l'ajout au modèle, 3 min pour le
+  téléchargement.
 
-Une version précédente allait plus loin : elle fermait le projet ouvert
-(`iface.clearProject()`), guettait l'arrivée du fichier sur le disque, puis
-l'ouvrait par `iface.loadFile()`. **Essayé sur l'appareil : ni le retour à
-l'accueil ni l'ouverture automatique n'aboutissent.** Ces étapes ont été
-retirées plutôt que laissées à demi fonctionnelles — une fenêtre qui ferme le
-projet sans parvenir à en ouvrir un autre laisse le technicien plus mal qu'elle
-ne l'a trouvé.
+Le passeur vit dans `main.qml` et non dans une fenêtre parce que `loadFile()`
+remplace le projet : le plugin d'application survit, mais « Créer une UE » est
+déjà refermée quand la réponse arrive.
 
-Le téléchargement lui-même n'est pas garanti : `QFieldCloudProjectsModel` ne
-fait pas partie de l'API des greffons et QField ne lui pose pas d'`objectName`,
-donc `findItemByObjectName()` ne le trouve pas. On n'en instancie jamais un :
-celui d'un greffon n'a pas de `cloudConnection`, et `refreshProjectsList()` la
-déréférence — QField plante, et un `try` QML n'attrape rien de ce qui se passe
-dans le C++. L'échec est sans conséquence : le message part de toute façon, et
-QField télécharge le projet quand on l'ouvre.
+#### Vérifié avant d'appeler le serveur
+
+`PasseurProjet.verifier()` rend `""` si tout est en place, sinon la raison de
+l'empêchement. Les fenêtres l'appellent **avant** de créer ou de verrouiller une
+unité — une unité créée dont le projet ne pourrait pas remplacer le projet
+courant laisserait le technicien à mi-chemin. Elle vérifie :
+
+1. que le modèle et ses méthodes sont atteignables dans cette version de QField ;
+2. que **QField lui-même** est connecté à QFieldCloud (`cloudConnection.hasToken`).
+   Le jeton d'`ifa_menu` (§10) ne sert à rien ici : c'est le compte de QField
+   qui télécharge ;
+3. qu'**aucune modification n'attend d'être synchronisée** dans le projet ouvert
+   (`ServiceValidation.deltasEnAttente`, §8). Remplacer le projet pourrait les
+   perdre.
+
+Le passeur **ne pousse pas** les modifications de lui-même : c'est un choix
+délibéré. Le message demande au technicien de synchroniser d'abord, puis de
+recommencer.
+
+#### La fenêtre d'attente — `DialogueAttente`
+
+Du clic jusqu'à l'ouverture du projet, une fenêtre **centrée et modale** montre
+une roue, le titre de l'opération (« Création de l'unité 02-12777-IPE ») et
+l'étape en cours :
+
+> Création de l'unité… → Unité créée et verrouillée — packaging en cours… →
+> Récupération du projet… → Téléchargement du projet… → Ouverture du projet…
+
+La fenêtre du plugin l'ouvre (`attente.suivre(titre, message)`), le passeur la
+poursuit (`suivre("", message)` garde le titre) et la referme. Elle vit dans
+`main.qml` pour **survivre à la fenêtre qui l'a ouverte** : « Créer une UE » se
+referme dès le packaging terminé, bien avant la fin du téléchargement.
+
+Elle n'a **aucun bouton** : un geste de trop au milieu d'un changement de projet
+ne doit pas la faire disparaître. Elle ne peut pas rester bloquée pour autant :
+chaque étape suivie a sa borne de temps (sondage du packaging, ajout,
+téléchargement).
+
+#### Le repli — `DialogueProjetPret`
+
+Si l'ouverture automatique échoue — QField déconnecté, téléchargement en échec,
+packaging trop long —, la fenêtre d'attente se referme et `DialogueProjetPret`
+**nomme le projet à ouvrir** depuis l'écran « Projets ». Il rappelle d'abord ce
+qui est acquis (« L'unité 02-12777-IPE est créée et verrouillée à votre nom. »),
+puis la raison de l'échec.
+
+Un dialogue et non un toast : un toast s'efface au bout de quelques secondes,
+précisément quand la carte réapparaît et que le regard est ailleurs — or le nom
+du projet est la seule prise pour retrouver son travail. Le dialogue ne part
+que sur « J'ai compris » ; le nom y est détaché du texte, dans son propre
+cadre.
+
+Il connaît deux états. Le plus souvent le paquet est **prêt** et attend dans la
+liste. Quand l'attente du packaging a expiré côté plugin — `sondagesMax`
+dépassé, le serveur travaille encore —, il le dit et invite à rafraîchir la
+liste dans quelques minutes : `ServiceFormulaire` émet alors `attenteExpiree`,
+et la fenêtre l'annonce par `passeur.annoncerOuvertureManuelle(nom, texte, false)`.
+Promettre un projet absent de l'écran « Projets » enverrait le technicien
+chercher pour rien.
+
+Une seule instance, dans `main.qml`, alimentée par le signal
+`ouvertureImpossible` du passeur.
 
 ### Ce que voit le technicien
 
-Le bandeau d'activité de la fenêtre donne l'étape — « Création de l'unité… »,
-puis « Unité 02-12777-IPE créée et verrouillée — packaging en cours… ». La
-fenêtre se referme quand le projet est prêt, et une notification nomme les deux
-choses qui comptent :
+1. Au clic, si QField n'est pas connecté ou si des modifications attendent
+   d'être synchronisées, un message le dit et **rien n'est envoyé** : l'unité
+   n'est pas créée.
+2. Sinon, la fenêtre d'attente s'ouvre et suit toutes les étapes. « Créer une
+   UE » se referme dès le packaging terminé, pour ne pas inviter à renvoyer le
+   même identifiant — une seconde demande identique serait traitée comme une
+   reprise, pas comme une nouvelle unité.
+3. Le projet `formulaire_UE_IFA` s'ouvre, et une notification le confirme.
 
-> Unité 02-12777-IPE créée et verrouillée. Ouvrez le projet
-> « formulaire_UE_IFA » depuis l'écran Projets de QField.
-
-Elle se referme parce que son travail est fait, et pour ne pas inviter à
-renvoyer le même identifiant — une seconde demande identique serait traitée
-comme une reprise, pas comme une nouvelle unité.
-
-En cas d'échec, la fenêtre reste ouverte **avec la saisie intacte** : l'appui
-peut être rejoué une fois la cause levée.
+En cas d'échec **avant** la création de l'unité, la fenêtre reste ouverte **avec
+la saisie intacte** : l'appui peut être rejoué une fois la cause levée. En cas
+d'échec **après**, l'unité existe et le dialogue de repli nomme le projet.
 
 ## 7. Consulter une UE
 
@@ -559,36 +623,45 @@ Un projet d'affichage par utilisateur et par mode, réutilisé d'une unité à l
 suivante : l'appareil garde ses réglages et son cache de fonds de carte. En
 contrepartie, ouvrir une autre unité **remplace** le contenu du projet ; le
 serveur refuse de le faire tant que des modifications n'ont pas été
-synchronisées.
+synchronisées. Le plugin le vérifie de son côté **avant même d'appeler le
+serveur** (`PasseurProjet.verifier()`, §6) : QField doit être connecté à
+QFieldCloud, et aucune modification ne doit attendre d'être synchronisée. Sinon
+un message le dit, et l'unité n'est pas verrouillée.
 
-L'ouverture se déroule en trois temps, dont le bandeau de progression rend
-compte : verrouillage, remplissage (la réponse donne le nombre d'enregistrements
-écrits), puis attente du packaging — un travail QGIS que le service suit par
-`GET /api/v1/jobs/<id>/`. Le projet est enfin proposé au téléchargement dans
-QField.
+L'ouverture se déroule en quatre temps : verrouillage, remplissage (la réponse
+donne le nombre d'enregistrements écrits), attente du packaging — un travail
+QGIS que le service suit par `GET /api/v1/jobs/<id>/` —, puis téléchargement et
+ouverture du projet **à la place du projet courant**, par `PasseurProjet` (§6).
+Le même passeur sert les deux modes ; en cas d'échec, le dialogue de repli
+rappelle ce qui est acquis (« L'unité … est verrouillée à votre nom. ») et nomme
+le projet à ouvrir depuis l'écran « Projets ».
 
-Le packaging prend de quelques secondes à quelques minutes, et l'attente se
-signale à trois endroits — un seul ne suffisait pas :
+```
+PasseurProjet.verifier()                     FenetreConsulterUE (avant tout appel)
+POST /api/v1/ifa/unites/<code>/ouvrir/       ServiceOuverture
+GET  /api/v1/jobs/<id>/  (sondage)           ServiceOuverture
+téléchargement · ouverture                   PasseurProjet
+```
 
-* un **toast** part dès le clic, avant même la réponse du serveur ;
+L'ensemble prend de quelques secondes à quelques minutes, et l'attente se
+signale à plusieurs endroits — un seul ne suffisait pas :
+
+* la **fenêtre d'attente centrée** (`DialogueAttente`, §6) suit toutes les
+  étapes, du verrouillage à l'ouverture du projet ;
+* un **toast** part dès le clic en consultation, avant même la réponse du
+  serveur ;
 * la **ligne du tableau** remplace ses actions par une roue et « Ouverture… »,
-  les autres lignes se désactivant (`TableauUE.uniteEnCours`) ;
+  les autres lignes se désactivant (`TableauUE.uniteEnCours`) — jusqu'à la fin
+  du téléchargement, pas seulement du packaging ;
 * un **bandeau** épinglé sous l'en-tête donne l'étape en cours
-  (`IfaPopup.activite`).
+  (`IfaPopup.activite`), repris du passeur une fois le packaging terminé.
 
 Le bandeau est volontairement **hors de la zone défilante**. Posé dans le flux,
 au-dessus du tableau, il sortait de l'écran dès que le technicien descendait la
 liste pour cliquer — c'est-à-dire exactement quand il servait.
 
-> L'ouverture automatique dans QField ne fonctionne pas encore.
-> `ServiceOuverture.resoudreModeleProjets()` cherche le modèle des projets par
-> `iface.findItemByObjectName()`, qui compare la propriété `objectName` — or les
-> trois noms essayés sont des `id` QML, qui n'existent qu'à la compilation. Le
-> type s'appelle d'ailleurs `QFieldCloudProjectsModel` (voir les en-têtes
-> installés sous `QField/usr/include/qfield/`), et QField ne pose `objectName`
-> que sur une courte liste d'objets dont il ne fait pas partie. Le service le
-> dit et nomme le projet à ouvrir — dans un dialogue qui reste à l'écran, voir
-> §6 : l'unité est prête dans tous les cas, seul le dernier geste reste manuel.
+Une fois le projet ouvert, la fenêtre « Consulter une UE » se referme : elle
+recouvrirait le projet qu'elle vient d'ouvrir.
 
 ### Rendre une unité
 
@@ -791,18 +864,38 @@ construction reste donc nul **pour toujours** : `iface.mainWindow()` n'est pas
 une propriété, la liaison ne se réévalue jamais. `open()` ne montre alors rien,
 sans la moindre erreur — c'est exactement ce qui est arrivé à
 `DialogueDeverrouillage`. Résoudre la zone parente **juste avant** d'ouvrir,
-comme le font `IfaPopup.onAboutToShow` et
-`DialogueDeverrouillage.resoudreZoneParente()`.
+comme le font `IfaPopup.onAboutToShow`,
+`DialogueDeverrouillage.resoudreZoneParente()`, `DialogueAttente.suivre()` et
+le repli du passeur dans `main.qml`.
 
 **Autorisation.** QField demande une autorisation au premier chargement d'un
 plugin. Elle est mémorisée par chemin d'installation : réinstaller ailleurs la
 redemande.
 
 **API non documentée.** `iface.findItemByObjectName()` sert à atteindre
-`dashBoard`, `overlayFeatureFormDrawer` et `positionSource`. Ces noms ne font pas
+`dashBoard`, `overlayFeatureFormDrawer`, `positionSource` et, pour
+`PasseurProjet`, `cloudProjectsModel` et `cloudConnection`. Ces noms ne font pas
 partie de l'API publique des plugins : une mise à jour de QField peut les
 renommer. Tous les appels sont donc gardés et signalent un message clair plutôt
-que de planter. Noms vérifiés sur QField `f7123fc` (31 juillet 2026).
+que de planter — le passeur vérifie aussi que chaque méthode appelée existe
+(`typeof … === "function"`). Noms vérifiés sur QField `f7123fc` (v4.2.11,
+31 juillet 2026). La recherche porte sur n'importe quel `QObject`, pas
+seulement les éléments visuels : un modèle se trouve aussi.
+
+**Pas d'énumérations QField dans le QML du plugin.** Les classes du cloud
+(`QFieldCloudProject.ProjectStatus`, …) ne sont pas garanties visibles d'un
+plugin. Le passeur s'en passe : il ne lit que des signaux, des booléens
+(`hasToken`) et des chaînes (`localPath`).
+
+**Un GeoPackage tronqué après une ouverture automatique.** Observé une fois
+(29 septembre 2026) : après « Créer une UE », `data.gpkg` arrivait coupé
+(643 Ko sur les 11 Mo annoncés par son en-tête), réécrit sur le disque trois
+secondes **après** un téléchargement complet — le serveur l'avait servi entier,
+sa copie était intacte. Non reproduit depuis, cause inconnue. Si cela revient :
+**ne toucher à aucun fichier**, et comparer tout de suite la taille du fichier,
+sa date, la taille annoncée par son en-tête (octets 28–31 × taille de page) et
+les journaux `nginx` du serveur. Supprimer la copie locale du projet puis le
+retélécharger depuis « Projets » répare.
 
 **Couleurs.** Les accents sont désignés par le **nom** d'une couleur du thème
 (`"mainColor"`, `"cloudColor"`), pas par une valeur `#rrggbb` : le rendu suit

@@ -26,21 +26,9 @@
 //  2. Le service interroge `GET /api/v1/jobs/<id>/` jusqu'à ce que ce travail
 //     soit terminé — le packaging tourne dans un conteneur QGIS, il prend de
 //     quelques secondes à quelques minutes.
-//  3. Le projet est proposé au téléchargement dans QField, et le service nomme
-//     le projet à ouvrir depuis l'écran « Projets ».
-//
-//  ---------------------------------------------------------------------------
-//  LE DERNIER GESTE RESTE MANUEL
-//  ---------------------------------------------------------------------------
-//  Une version précédente fermait le projet ouvert, attendait le fichier sur le
-//  disque et l'ouvrait par `iface.loadFile()`. Essayé sur l'appareil : ni le
-//  retour à l'accueil ni l'ouverture automatique n'aboutissent. Ces étapes ont
-//  donc été retirées, et ce service fait exactement ce que fait
-//  `ServiceOuverture` après un packaging : il demande le téléchargement à
-//  `QFieldCloudProjectsModel` — s'il l'atteint, ce qui n'est pas garanti, le
-//  modèle ne faisant pas partie de l'API des greffons — puis signale le nom du
-//  projet. Rien n'est fermé, rien n'est remplacé : le technicien garde son
-//  projet à l'écran et ouvre le nouveau quand il le décide.
+//  3. Le projet est remis à `PasseurProjet`, qui le télécharge et l'ouvre à la
+//     place du projet courant. S'il n'y parvient pas, il nomme le projet à
+//     ouvrir depuis l'écran « Projets ».
 //
 //  L'unité, elle, est créée dans tous les cas : c'est acquis dès la réponse du
 //  serveur, avant même le packaging.
@@ -87,6 +75,10 @@ Item {
   // ---------------------------------------------------------------------------
   property var session: null
 
+  // Rapatrie et ouvre le projet préparé (PasseurProjet.qml), ou l'annonce
+  // pour une ouverture manuelle s'il n'y parvient pas.
+  property var passeur: null
+
   // ---------------------------------------------------------------------------
   //  État
   // ---------------------------------------------------------------------------
@@ -110,16 +102,12 @@ Item {
   // Le projet est prêt sur le serveur.
   signal pret(var infos)
 
-  // Le projet reste à ouvrir à la main. Émis systématiquement après `pret` :
-  // QField n'ouvre pas le projet lui-même (voir l'en-tête), que le
-  // téléchargement ait pu être demandé ou non.
-  // `paquetPret` distingue les deux façons dont on en arrive à une ouverture
-  // manuelle : le packaging est terminé et le projet attend dans la liste, ou
-  // l'attente a expiré et le serveur travaille encore. Les deux demandent le
-  // même geste — aller dans « Projets » — mais pas au même moment, et
-  // promettre un projet qui n'est pas là enverrait le technicien chercher
-  // pour rien.
-  signal ouvertureManuelle(string nomProjet, bool paquetPret)
+  // L'attente du packaging a expiré : le serveur y travaille encore, il n'y a
+  // rien à télécharger. Le projet reste à ouvrir à la main, plus tard — la
+  // fenêtre l'annonce par le passeur (`annoncerOuvertureManuelle`). Les
+  // échecs du téléchargement ou de l'ouverture, eux, sont annoncés par le
+  // passeur lui-même.
+  signal attenteExpiree(string nomProjet)
 
   signal progression(string message)
   signal echec(string message)
@@ -154,7 +142,7 @@ Item {
   //              quel.
   //  `variables` contexte de la saisie, posé en variables du projet livré.
   function creer(unite, criteres, variables) {
-    if (!session) {
+    if (!session || !passeur) {
       echec(qsTr("Le service de création n'est pas relié à la session QFieldCloud."));
       return;
     }
@@ -297,7 +285,7 @@ Item {
       // Le packaging se poursuit sur le serveur : l'attente cesse, pas le
       // travail. Le projet finira par être disponible sous son nom.
       terminer();
-      ouvertureManuelle(projetNom, false);
+      attenteExpiree(projetNom);
       return;
     }
 
@@ -352,62 +340,11 @@ Item {
       "unite": uniteCreee
     });
 
-    // Le téléchargement est demandé si QField laisse l'atteindre, mais rien
-    // n'en dépend : le projet est signalé dans tous les cas, et c'est le
-    // technicien qui l'ouvre.
-    telecharger(projetId);
-
-    ouvertureManuelle(projetNom, true);
-  }
-
-  // Demande à QField de rapatrier le projet.
-  //
-  // `CloudProjectsModel` ne fait pas partie de l'API des greffons : les noms
-  // essayés ici sont ceux qu'emploie l'application, et une version qui ne les
-  // expose pas fait simplement retomber sur un téléchargement manuel depuis
-  // l'écran « Projets ». Même mécanique que `ServiceOuverture.telecharger()`.
-  function telecharger(identifiant) {
-    const modele = resoudreModeleProjets();
-
-    if (!modele) {
-      iface.logMessage("[IFA] modele des projets infonuagiques inatteignable : telechargement manuel");
-      return false;
-    }
-
-    try {
-      if (typeof modele.refreshProjectsList === "function")
-        modele.refreshProjectsList();
-
-      if (typeof modele.downloadProject === "function") {
-        modele.downloadProject(identifiant);
-        return true;
-      }
-
-      if (typeof modele.projectDownload === "function") {
-        modele.projectDownload(identifiant);
-        return true;
-      }
-    } catch (e) {
-      iface.logMessage("[IFA] telechargement automatique impossible : " + e);
-    }
-
-    return false;
-  }
-
-  function resoudreModeleProjets() {
-    const noms = ["cloudProjectsModel", "CloudProjectsModel", "cloudProjects"];
-
-    for (let i = 0; i < noms.length; ++i) {
-      try {
-        const objet = iface.findItemByObjectName(noms[i]);
-        if (objet)
-          return objet;
-      } catch (e) {
-        // Nom inconnu de cette version de QField : on essaie le suivant.
-      }
-    }
-
-    return null;
+    // L'unité est créée et verrouillée quoi qu'il arrive ensuite : le passeur
+    // le rappelle en tête de son message de repli si QField ne peut pas ouvrir
+    // le projet.
+    const code = uniteCreee && uniteCreee["une_code_ident"] ? "" + uniteCreee["une_code_ident"] : "";
+    passeur.demander(projetId, projetNom, code !== "" ? qsTr("L'unité %1 est créée et verrouillée à votre nom.").arg(code) : "");
   }
 
   // ===========================================================================

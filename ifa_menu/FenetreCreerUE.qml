@@ -23,13 +23,12 @@
 //    3. il remplit son GeoPackage des données choisies dans « Données à
 //       embarquer », lues dans le schéma `ifa_data`, la nouvelle unité
 //       comprise ;
-//    4. le téléchargement est demandé à QField, et la fenêtre nomme le projet
-//       à ouvrir depuis l'écran « Projets ».
+//    4. `PasseurProjet` télécharge le projet et l'ouvre à la place du projet
+//       courant ; s'il n'y parvient pas, un dialogue nomme le projet à ouvrir
+//       depuis l'écran « Projets ».
 //
-//  Le projet ouvert n'est ni fermé ni remplacé : le dernier geste appartient au
-//  technicien. Fermer la carte et ouvrir le nouveau projet par
-//  `iface.clearProject()` / `iface.loadFile()` a été essayé sur l'appareil, sans
-//  succès — voir `ServiceFormulaire.qml`.
+//  Une fenêtre d'attente centrée (DialogueAttente, dans main.qml) suit tout
+//  le parcours, y compris après la fermeture de cette fenêtre.
 //
 //  Les valeurs saisies ici ne sont donc plus posées sur le projet ouvert : ce
 //  n'est pas lui qui recevra la saisie. Elles partent avec la demande et le
@@ -574,19 +573,6 @@ IfaPopup {
   }
 
   // ---------------------------------------------------------------------------
-  //  Le projet de saisie, une fois prêt
-  // ---------------------------------------------------------------------------
-  //  Rattaché à la zone utile et non à cette fenêtre : `onPret` la referme au
-  //  moment même où le projet devient disponible, et un dialogue posé dans
-  //  cette fenêtre disparaîtrait avec elle.
-  DialogueProjetPret {
-    id: dialogueProjet
-
-    zoneParente: fenetre.zoneUtile
-    accent: fenetre.accent
-  }
-
-  // ---------------------------------------------------------------------------
   //  Tracé de l'emprise sur la carte
   // ---------------------------------------------------------------------------
   //  Le sélecteur se rattache lui-même au conteneur de la carte : il sort donc
@@ -645,37 +631,46 @@ IfaPopup {
     id: formulaire
 
     session: fenetre.session
+    passeur: fenetre.passeur
 
+    // Le bandeau pour la fenêtre, la fenêtre d'attente centrée pour tout le
+    // parcours : elle reste à l'écran quand cette fenêtre se referme, jusqu'à
+    // l'ouverture du projet par le passeur.
     onProgression: function (message) {
       fenetre.activite = message;
+      if (fenetre.attente)
+        fenetre.attente.suivre(qsTr("Création de l'unité %1").arg(fenetre.codeUniteCreee()), message);
     }
 
     onPret: function (infos) {
       // L'unité est créée, le projet est packagé : la fenêtre a fini son
       // travail. Elle se referme pour ne pas inviter à renvoyer le même
-      // identifiant, et laisse la carte au technicien — rien n'est remplacé.
+      // identifiant ; la fenêtre d'attente, dans main.qml, suit le passeur
+      // jusqu'à l'ouverture du projet.
       fenetre.activite = "";
       fenetre.close();
     }
 
-    onOuvertureManuelle: function (nomProjet, paquetPret) {
-      // QField n'ouvre pas le projet de lui-même : le nommer est tout ce dont
-      // le technicien a besoin pour le trouver dans l'écran « Projets ». Un
-      // toast s'effaçait au bout de quelques secondes, et arrivait au moment
-      // même où cette fenêtre se referme — le nom du projet se perdait. D'où
-      // un dialogue, qui ne part qu'à la demande.
-      //
-      // Le message part aussi quand l'attente du packaging a expiré, sans que
-      // `pret` ait été émis : le code de l'unité se lit donc sur le service,
-      // qui le tient depuis la réponse du serveur, et non sur `pret`.
+    // Le packaging n'a pas fini dans le temps imparti : l'unité existe, le
+    // projet arrivera plus tard sous son nom. Le dialogue de repli commun
+    // (main.qml) le nomme ; il referme aussi la fenêtre d'attente.
+    //
+    // Le code de l'unité se lit sur le service, qui le tient depuis la
+    // réponse du serveur : `pret` n'a pas été émis.
+    onAttenteExpiree: function (nomProjet) {
       fenetre.activite = "";
-      dialogueProjet.annoncer(nomProjet, qsTr("L'unité %1 est créée et verrouillée à votre nom.").arg(fenetre.codeUniteCreee()), paquetPret);
+      if (fenetre.passeur)
+        fenetre.passeur.annoncerOuvertureManuelle(nomProjet, qsTr("L'unité %1 est créée et verrouillée à votre nom.").arg(fenetre.codeUniteCreee()), false);
+      else if (fenetre.attente)
+        fenetre.attente.terminer();
     }
 
     onEchec: function (message) {
       // La fenêtre est encore là : la saisie est intacte, l'appui peut être
       // rejoué une fois la cause levée.
       fenetre.activite = "";
+      if (fenetre.attente)
+        fenetre.attente.terminer();
       fenetre.avertir(message, "error");
     }
   }
@@ -739,7 +734,17 @@ IfaPopup {
 
   // Demande au serveur le projet de saisie, puis laisse le service enchaîner
   // sur le téléchargement et l'ouverture.
+  //
+  // Le passeur est consulté d'abord : une unité créée — donc verrouillée —
+  // dont le projet ne pourrait pas remplacer le projet courant (modifications
+  // non synchronisées, QField déconnecté) laisserait le technicien à mi-chemin.
   function creerUe() {
+    const empechement = passeur ? passeur.verifier() : "";
+    if (empechement !== "") {
+      avertir(empechement, "warning");
+      return;
+    }
+
     formulaire.creer(uniteACreer(), filtreDonnees(), variablesProjet());
   }
 

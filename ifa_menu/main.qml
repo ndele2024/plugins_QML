@@ -31,6 +31,8 @@
 //    Referentiels.qml          listes de référence + accès aux couches
 //    SessionCloud.qml          jeton et appels authentifiés à QFieldCloud
 //    ServiceUE.qml             recherche des UE sur le serveur
+//    PasseurProjet.qml         rapatrie et ouvre un projet QFieldCloud
+//    DialogueAttente.qml       fenêtre d'attente centrée pendant l'ouverture
 //    Fenetre*.qml              une fenêtre par commande
 // =============================================================================
 
@@ -193,13 +195,100 @@ Item {
     session: sessionCloud
 
     onTermine: function (deverrouille) {
+      // Lève `attenteRapport` : la fenêtre d'attente de validation, plus bas,
+      // prend le relais et dit au technicien que le serveur travaille.
       serviceValidation.attendreRapportFrais();
-
-      // La fenêtre de validation n'est pas ouverte à ce moment-là : sans ce
-      // message, rien ne dirait au technicien que le serveur travaille pour
-      // lui. Le bouton de la barre d'outils bat, mais il faut le regarder.
-      plugin.avertir(qsTr("Modifications synchronisées — validation en cours sur le serveur…"));
     }
+  }
+
+  //  L'attente du rapport après un push, dans une fenêtre centrée. Elle
+  //  s'ouvre quand `attenteRapport` se lève — c'est-à-dire APRÈS la question
+  //  du déverrouillage, qu'elle recouvrirait sinon — et se referme quand il
+  //  retombe : rapport reçu, ou tentatives épuisées (une minute environ).
+  //  Instance distincte de celle du passeur : les deux attentes ne se
+  //  gênent jamais.
+  DialogueAttente {
+    id: dialogueAttenteValidation
+
+    consigne: qsTr("Le serveur valide vos données. Cela prend en général moins d'une minute.")
+  }
+
+  Connections {
+    target: serviceValidation
+
+    function onAttenteRapportChanged() {
+      if (serviceValidation.attenteRapport)
+        dialogueAttenteValidation.suivre(qsTr("Validation des données"), serviceValidation.diagnostic);
+      else
+        dialogueAttenteValidation.terminer();
+    }
+
+    function onDiagnosticChanged() {
+      if (serviceValidation.attenteRapport)
+        dialogueAttenteValidation.suivre("", serviceValidation.diagnostic);
+    }
+
+    // Tentatives épuisées : la fenêtre s'est refermée sans verdict. Le dire,
+    // sinon sa disparition passerait pour un rapport arrivé.
+    function onPerimeChanged() {
+      if (serviceValidation.perime)
+        plugin.avertir(serviceValidation.diagnostic, "warning");
+    }
+  }
+
+  // ===========================================================================
+  //  Ouverture automatique des projets préparés par le serveur
+  // ===========================================================================
+  //  Rapatrie un projet QFieldCloud et l'ouvre à la place du projet courant.
+  //  Ici et non dans une fenêtre : `iface.loadFile()` démonte le projet, et la
+  //  réponse doit trouver quelqu'un pour l'entendre. Voir PasseurProjet.qml.
+  //
+  //  Utilisé par « Consulter une UE » (les deux modes) et « Créer une UE ».
+  PasseurProjet {
+    id: passeurProjet
+
+    validation: serviceValidation
+
+    // La fenêtre d'attente a été ouverte par la fenêtre appelante, avec son
+    // titre ; le passeur n'y ajoute que ses étapes.
+    onProgression: function (message) {
+      dialogueAttente.suivre("", message);
+    }
+
+    onProjetOuvert: function (projetId, nomProjet) {
+      dialogueAttente.terminer();
+      // La fenêtre qui a demandé l'ouverture recouvrirait le projet qu'elle
+      // vient d'ouvrir.
+      if (chargeurFenetre.item)
+        chargeurFenetre.item.close();
+      plugin.avertir(qsTr("Projet %1 ouvert.").arg(nomProjet), "success");
+    }
+
+    // Le repli d'avant : le projet est prêt sur le serveur, le technicien
+    // l'ouvre lui-même depuis l'écran « Projets ». Le dialogue dit pourquoi
+    // l'ouverture automatique n'a pas eu lieu.
+    onOuvertureImpossible: function (nomProjet, raison, pret) {
+      dialogueAttente.terminer();
+      if (!dialogueProjetGlobal.zoneParente && iface.mainWindow())
+        dialogueProjetGlobal.zoneParente = iface.mainWindow().contentItem;
+      dialogueProjetGlobal.annoncer(nomProjet, raison, pret);
+    }
+  }
+
+  // Le dialogue de repli du passeur. Il vit ici pour la même raison que lui ;
+  // sa zone est résolue juste avant l'ouverture, jamais à la construction —
+  // la fenêtre principale n'existe pas encore quand le plugin se charge.
+  DialogueProjetPret {
+    id: dialogueProjetGlobal
+
+    accent: Theme.cloudColor
+  }
+
+  // La fenêtre d'attente centrée, du clic à l'ouverture du projet. Ouverte
+  // par les fenêtres (verrouillage, création, packaging), poursuivie par le
+  // passeur, refermée par lui. Ici pour survivre à la fenêtre qui l'a ouverte.
+  DialogueAttente {
+    id: dialogueAttente
   }
 
   // ===========================================================================
@@ -360,6 +449,8 @@ Item {
       item.referentiels = donneesReferentiels;
       item.session = sessionCloud;
       item.validation = serviceValidation;
+      item.passeur = passeurProjet;
+      item.attente = dialogueAttente;
       item.open();
     }
 

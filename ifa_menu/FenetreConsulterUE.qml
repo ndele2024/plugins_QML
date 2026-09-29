@@ -45,7 +45,13 @@ IfaPopup {
   // puis le packaging prennent de quelques secondes à quelques minutes, et la
   // liste des résultats défile : un bandeau posé dans le flux sortirait de
   // l'écran au moment même où le technicien clique.
-  activite: ouverture.enCours ? messageOuverture : ""
+  //
+  // Le bandeau court jusqu'à l'ouverture du projet : une fois le packaging
+  // fini, le passeur prend le relais (téléchargement, ouverture) avec ses
+  // propres messages.
+  activite: ouverture.enCours ? messageOuverture : (passeurActif ? passeur.message : "")
+
+  readonly property bool passeurActif: passeur !== null && passeur.enCours
 
   // ---------------------------------------------------------------------------
   //  État
@@ -517,7 +523,7 @@ IfaPopup {
       // fermé : seul son détenteur peut lever un verrou.
       utilisateur: fenetre.session ? fenetre.session.utilisateur : ""
 
-      uniteEnCours: ouverture.enCours ? ouverture.uniteCourante : ""
+      uniteEnCours: ouverture.enCours || fenetre.passeurActif ? ouverture.uniteCourante : ""
       uniteDeverrouillage: verrouillage.enCours ? verrouillage.uniteCourante : ""
 
       onOuvrirVerrouille: function (unite) {
@@ -627,30 +633,27 @@ IfaPopup {
     id: ouverture
 
     session: fenetre.session
+    passeur: fenetre.passeur
 
+    // Le bandeau pour la fenêtre, la fenêtre d'attente centrée pour tout le
+    // parcours : le passeur la reprend après le packaging et la referme à
+    // l'ouverture du projet.
     onProgression: function (message) {
       fenetre.messageOuverture = message;
+      if (fenetre.attente)
+        fenetre.attente.suivre(ouverture.modeCourant === "modifiable" ? qsTr("Ouverture de l'unité %1 (modifiable)").arg(ouverture.uniteCourante) : qsTr("Ouverture de l'unité %1 (consultation)").arg(ouverture.uniteCourante), message);
     }
 
+    // Plus de toast ici : la fenêtre d'attente enchaîne sur le téléchargement.
     onPret: function (infos) {
       fenetre.messageOuverture = "";
       fenetre.appliquerVerrou(infos["verrou"]);
-      avertir(qsTr("Unité %1 prête dans le projet %2.").arg(infos["unite"]).arg(infos["projet_nom"]), "success");
-    }
-
-    onOuvertureManuelle: function (nomProjet) {
-      // Le projet est prêt sur le serveur ; seule son ouverture automatique a
-      // échoué. Le nom du projet devient alors la seule prise du technicien
-      // pour retrouver son travail : un dialogue, pas un toast — voir
-      // l'en-tête de `DialogueProjetPret`.
-      fenetre.messageOuverture = "";
-
-      const code = ouverture.uniteCourante;
-      dialogueProjet.annoncer(nomProjet, code !== "" ? qsTr("L'unité %1 est prête.").arg(code) : "");
     }
 
     onEchec: function (message) {
       fenetre.messageOuverture = "";
+      if (fenetre.attente)
+        fenetre.attente.terminer();
       fenetre.messageErreur = message;
       avertir(message, "warning");
     }
@@ -691,16 +694,6 @@ IfaPopup {
     onValide: function (raison) {
       ouverture.ouvrir(dialogueRaison.unite, "modifiable", raison);
     }
-  }
-
-  // Le projet préparé est à ouvrir à la main depuis l'écran « Projets » de
-  // QField. Le dialogue reste à l'écran tant que le technicien ne l'a pas
-  // refermé : il porte le nom du projet, et rien d'autre ne le donne.
-  DialogueProjetPret {
-    id: dialogueProjet
-
-    zoneParente: fenetre.zoneUtile
-    accent: fenetre.accent
   }
 
   // ===========================================================================
@@ -1025,12 +1018,23 @@ IfaPopup {
     if (!unite)
       return;
 
-    if (ouverture.enCours) {
+    if (ouverture.enCours || passeurActif) {
       avertir(qsTr("Ouverture de l'unité %1 en cours — patientez.").arg(ouverture.uniteCourante), "info");
       return;
     }
 
     messageErreur = "";
+
+    // Avant tout appel au serveur : verrouiller une unité dont le projet ne
+    // pourra pas remplacer le projet courant (modifications non
+    // synchronisées, QField déconnecté) laisserait le technicien à mi-chemin.
+    const empechement = passeur ? passeur.verifier() : "";
+    if (empechement !== "") {
+      messageErreur = empechement;
+      avertir(empechement, "warning");
+      return;
+    }
+
     referentiels.definirVariableProjet("une_code_ident", unite["une_code_ident"]);
 
     if (avecVerrou) {
@@ -1086,7 +1090,7 @@ IfaPopup {
     if (!unite)
       return;
 
-    if (ouverture.enCours || verrouillage.enCours) {
+    if (ouverture.enCours || passeurActif || verrouillage.enCours) {
       avertir(qsTr("Un traitement est déjà en cours — patientez."), "info");
       return;
     }
