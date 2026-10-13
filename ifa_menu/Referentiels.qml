@@ -159,6 +159,16 @@ QtObject {
   property var projetsParRegion: ({})
   property bool projetsCharges: false
 
+  // Projets créés depuis « Créer un projet » pendant la session. La couche ne
+  // les verra qu'après une synchronisation ; `chargerProjets()` les y ajoute
+  // en attendant, sans quoi la relecture de la couche les effacerait.
+  property var projetsCrees: []
+
+  // N° (en minuscules) des projets que la couche porte encore mais qui ne
+  // doivent plus figurer dans la liste : supprimés, renommés, ou sortis de
+  // production pendant la session.
+  property var numerosRetires: []
+
   // ---------------------------------------------------------------------------
   //  Accès aux couches
   // ---------------------------------------------------------------------------
@@ -200,6 +210,19 @@ QtObject {
     }
     it.close();
 
+    // Les changements de la session, tant que la couche ne les porte pas
+    // encore — la comparaison ignore la casse, comme le serveur. Une entrée de
+    // `projetsCrees` remplace celle de la couche : c'est la plus récente.
+    const numerosSession = projetsCrees.map(function (p) {
+      return ("" + p["pro_no"]).toLowerCase();
+    });
+    const filtree = liste.filter(function (p) {
+      const numero = ("" + p["pro_no"]).toLowerCase();
+      return numerosRetires.indexOf(numero) === -1 && numerosSession.indexOf(numero) === -1;
+    });
+    liste.length = 0;
+    Array.prototype.push.apply(liste, filtree.concat(projetsCrees));
+
     liste.sort(function (a, b) {
       return b["pro_an"] - a["pro_an"];
     });
@@ -216,6 +239,55 @@ QtObject {
     projetsParRegion = parRegion;
     projetsCharges = true;
     return true;
+  }
+
+  // Retient un projet que le serveur vient d'inscrire, tel que le rend
+  // `ServiceProjet`. Seuls les projets en production entrent dans la liste :
+  // c'est la règle de `chargerProjets()`.
+  function ajouterProjet(projet) {
+    if (!projet || projet["pro_code_statu"] !== "Pr")
+      return;
+
+    const numero = ("" + projet["pro_no"]).toLowerCase();
+    numerosRetires = numerosRetires.filter(function (n) {
+      return n !== numero;
+    });
+
+    const copie = projetsCrees.filter(function (p) {
+      return ("" + p["pro_no"]).toLowerCase() !== numero;
+    });
+    copie.push({
+      "pro_no": projet["pro_no"],
+      "pro_nom": projet["pro_nom"],
+      "rad_no": projet["rad_no"],
+      "pro_an": projet["pro_an"]
+    });
+    projetsCrees = copie;
+
+    if (projetsCharges)
+      chargerProjets();
+  }
+
+  // Retire un projet de la liste : supprimé, ou plus en production.
+  function retirerProjet(numero) {
+    const n = ("" + numero).toLowerCase();
+
+    projetsCrees = projetsCrees.filter(function (p) {
+      return ("" + p["pro_no"]).toLowerCase() !== n;
+    });
+    if (numerosRetires.indexOf(n) === -1)
+      numerosRetires = numerosRetires.concat([n]);
+
+    if (projetsCharges)
+      chargerProjets();
+  }
+
+  // Un projet vient d'être modifié : il peut avoir changé de n°, de nom, de
+  // région ou de statut. L'ancienne entrée part, la nouvelle entre si le
+  // projet est en production.
+  function majProjet(ancienNumero, projet) {
+    retirerProjet(ancienNumero);
+    ajouterProjet(projet);
   }
 
   // Projets d'une région donnée ; tous les projets si aucune région n'est

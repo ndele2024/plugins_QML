@@ -7,8 +7,8 @@ principal, d'où partent toutes les fonctions.
 ```
 IFA 2.0
 ├── Gestionnaire de projet
-│   ├── Créer un projet                    → FenetreCreerProjet.qml     (squelette)
-│   └── Modifier / Afficher un projet      → FenetreModifierProjet.qml  (squelette)
+│   ├── Créer un projet                    → FenetreCreerProjet.qml     (fonctionnel)
+│   └── Modifier / Afficher / Supprimer    → FenetreModifierProjet.qml  (fonctionnel)
 ├── Gestionnaire d'unité d'échantillonnage
 │   ├── Créer une UE                       → FenetreCreerUE.qml         (fonctionnel)
 │   └── Consulter une UE                   → FenetreConsulterUE.qml     (fonctionnel)
@@ -32,6 +32,7 @@ IFA 2.0
 | `SelecteurEmprise.qml` | Tracé d'une emprise polygonale sur la carte — voir §6. |
 | `SessionCloud.qml` | Jeton et appels authentifiés à QFieldCloud — voir §10. |
 | `ServiceUE.qml` | Recherche des unités d'échantillonnage sur le serveur — voir §7. |
+| `ServiceProjet.qml` | Tout ce qui touche aux projets de sondage côté serveur : types d'UE, création, liste, lecture, modification, suppression — voir §6, §11 et §12. |
 | `ServiceOuverture.qml` | Ouverture d'une UE dans QField : verrou, projet d'affichage, packaging — voir §7. |
 | `ServiceFormulaire.qml` | Création de l'UE et préparation de son projet de saisie — voir §6. |
 | `ServiceVerrou.qml` | Levée du verrou d'une UE, à la demande de son détenteur — voir §7 et §8. |
@@ -39,6 +40,7 @@ IFA 2.0
 | `FenetreValidation.qml` | Verdict, compteurs et anomalies du rapport — voir §8. |
 | `DialogueDeverrouillage.qml` | Après une synchronisation : rendre l'unité, ou la garder — voir §8. |
 | `DialogueRaisonVerrou.qml` | Saisie du motif du verrouillage, avec motifs suggérés. |
+| `DialogueTypeUe.qml` | Ajout d'un type d'UE à un projet, avec le nombre d'implantations et de remesurages planifiés — voir §11. |
 | `PasseurProjet.qml` | Télécharge le projet préparé par le serveur et l'ouvre à la place du projet courant — voir §6. |
 | `DialogueAttente.qml` | Fenêtre d'attente centrée. Deux instances : ouverture d'un projet (§6), attente du rapport après un push (§8). |
 | `DialogueProjetPret.qml` | Repli quand l'ouverture automatique échoue : le nom du projet, à ouvrir depuis l'écran « Projets » — voir §6. |
@@ -48,6 +50,11 @@ IFA 2.0
 | `ExplorateurProjets.qml` | Parcours de `cloud_projects` sur le disque. **Sans appelant aujourd'hui** : conservé pour ce qu'il sait de l'arborescence des projets. |
 | `EtiquetteVerrou.qml` | Pastille d'état de verrouillage d'une UE. |
 | `FenetreCreerUE.qml` | Formulaire de création d'une UE — **le modèle à suivre** pour les autres. |
+| `FenetreCreerProjet.qml` | Création d'un projet de sondage — voir §11. |
+| `FenetreModifierProjet.qml` | Liste des projets ; affichage, modification et suppression de l'un d'eux, selon les droits — voir §12. |
+| `FormulaireProjet.qml` | Les champs d'un projet, communs aux deux fenêtres : un champ hors droits reste lisible, grisé — voir §12. |
+| `DialogueAlerte.qml` | Alerte d'information : la raison d'un refus, qu'une notification ferait manquer. |
+| `DialogueSuppressionProjet.qml` | Confirmation de la suppression d'un projet, avec mot de passe — voir §12. |
 | `Fenetre*.qml` | Une fenêtre par commande. |
 | `metadata.txt`, `icon.svg` | Identité du plugin dans la liste des plugins de QField. |
 | `install.py` | Installation (plugin d'application, plugin de projet, ou archive .zip). |
@@ -216,7 +223,8 @@ les listes de référence et **tous les accès aux couches**.
 | `regions` | Les 17 régions administratives (`{ code, nom }`). |
 | `typesUe` | Les 13 types d'UE (`{ code, nom }`). |
 | `couche(nom)` | La couche, ou `null` si absente. **Toujours passer par là** : `mapLayersByName(nom)[0]` lève une erreur quand la couche n'existe pas. |
-| `chargerProjets()` | Lit `proje_sonda` (projets en production, triés par année décroissante). |
+| `chargerProjets()` | Lit `proje_sonda` (projets en production, triés par année décroissante), plus les projets créés pendant la session. |
+| `ajouterProjet(projet)` | Retient un projet que le serveur vient de créer, s'il est en production — voir §11. |
 | `projetsDeLaRegion(code)` | Projets d'une région ; tous si `code` est vide. |
 | `rechercherLce(no)` | `{ coucheDisponible, trouve, nom, mrc }` depuis la couche `LCE`. |
 | `regionParGps()` | Code de région déduit de la position, via la couche `regio_s`. |
@@ -292,6 +300,39 @@ Le serveur retrouve — ou crée à partir du projet modèle
 GeoPackage des données choisies ci-dessous, lues dans le schéma `ifa_data`, la
 nouvelle unité comprise. Voir le §5 du README de `qfieldcloud.ifa` pour ce qui
 se passe côté serveur.
+
+### Les types d'UE suivent le projet choisi
+
+Choisir un projet restreint la liste « Type d'UE » aux types que ce projet
+prévoit — ceux qu'on lui a associés dans « Créer un projet » (§11), table
+`proje_type_unite_echan`. Ils sont demandés au serveur à chaque changement de
+projet (`ServiceProjet.chargerTypesDuProjet()`, point d'accès
+`GET projets-sondage/types-ue/?pro_no=…`, §13 du README de `qfieldcloud.ifa`).
+
+**Tous les types restent proposés** — la liste de `Referentiels.typesUe` —
+quand :
+
+| Cas | Phrase sous la liste |
+|---|---|
+| Aucun projet choisi | « Tous les types d'UE sont proposés. Choisissez un projet pour ne voir que les siens. » |
+| Le projet ne prévoit aucun type — c'est le cas des 166 projets hérités | « Le projet … ne prévoit aucun type d'UE : tous les types sont proposés. » |
+| Types du projet indisponibles : pas de session, serveur injoignable, projet inconnu du serveur | « Types du projet indisponibles (…) : tous les types sont proposés. » (en orange) |
+
+Un échec ne bloque donc jamais la saisie. Pendant la demande, la phrase dit
+« Recherche des types d'UE du projet… ». Changer de projet pendant l'attente
+abandonne la demande précédente : sa réponse, si elle arrive, est ignorée.
+
+**Rapprochement avec les abréviations.** L'identifiant se compose avec
+l'abréviation du type (`02-12777-IPE`), que seule `Referentiels.typesUe` connaît
+— la base n'en a pas. Les types du projet y sont donc retrouvés par leur
+libellé (casse et espaces ignorés). Un type du projet absent de cette liste —
+ADNe, Enregistrement saumon atlantique… — est proposé quand même, **sans
+abréviation** : l'identifiant garde `[type]`, « Créer » reste éteint, et la
+phrase invite à compléter l'identifiant à la main. Le type voyage par son
+libellé, que le serveur sait résoudre.
+
+**Le type choisi est conservé** quand la liste change, s'il figure dans la
+nouvelle ; sinon la sélection est vidée.
 
 ### Les données à embarquer
 
@@ -1028,3 +1069,188 @@ authentification est demandée, la requête est rejouée **une** fois.
 **Une minuterie par requête.** Plusieurs recherches peuvent être en vol en même
 temps ; un `Timer` unique les mélangerait. Au-delà de 30 secondes, l'appel rend
 un message plutôt qu'un sablier éternel.
+
+---
+
+## 11. Créer un projet
+
+`FenetreCreerProjet.qml` déclare un **projet de sondage** dans la base IFA. Ses
+champs sont ceux de `FormulaireProjet.qml`, partagé avec « Modifier / Afficher /
+Supprimer un projet » (§12) : un champ ajouté l'est pour les deux fenêtres.
+
+Le projet est inscrit dans `ifa_data.proje_sonda`, et les **types d'UE** qu'il
+planifie dans `ifa_data.proje_type_unite_echan`, par `ServiceProjet.qml` et les points
+d'accès `GET /api/v1/ifa/types-ue/` et `POST /api/v1/ifa/projets-sondage/` (voir
+le README de `qfieldcloud.ifa`, §11 et §12).
+
+| Bloc | Champs |
+|---|---|
+| Identification | N° du projet\*, nom\*, année\* (l'année courante par défaut), région\* (présélectionnée comme dans « Créer une UE » : variable `code_region`, sinon GPS). |
+| Statut | En élaboration (par défaut) ou en production ; inventaire normalisé (oui / non). |
+| Types d'UE planifiés\* | Au moins un type, ajouté par le bouton « Ajouter un type d'UE » avec son nombre d'implantations\* et son nombre de remesurages\* planifiés. |
+| Description | Description (1 000 caractères) et commentaire (4 000), avec compteur. |
+
+Les longueurs des champs sont celles des colonnes ; le serveur les revérifie de
+toute façon. L'identifiant (UUID), les dates, l'utilisateur et la version de
+type ne se saisissent pas : le serveur les fixe.
+
+### Les types d'UE
+
+Un projet planifie plusieurs types d'UE, et un type d'UE se retrouve dans
+plusieurs projets. Ajouter un type, c'est dire ce qu'on y planifie : d'où une
+fenêtre à part, plutôt qu'une case à cocher.
+
+```
+Types d'UE planifiés *
+┌──────────────────────────────────────────────┐
+│ Pêche sportive                        ✎   🗑 │
+│ 12 implantations  ·  3 remesurages planifiés │
+└──────────────────────────────────────────────┘
+┌──────────────────────────────────────────────┐
+│ ADNe                                  ✎   🗑 │
+│ 1 implantation  ·  0 remesurage planifié     │
+└──────────────────────────────────────────────┘
+[ +  Ajouter un type d'UE ]
+```
+
+- **« Ajouter un type d'UE »** ouvre `DialogueTypeUe` : le type, le nombre
+  d'implantations planifiées (au moins 1) et le nombre de remesurages planifiés
+  (0 ou plus). Les trois sont exigés ; « Ajouter » reste éteint tant qu'il en
+  manque un, et une phrase dit lequel.
+- **Le dialogue ne propose que les types pas encore ajoutés** : un type ne
+  figure qu'une fois par projet. Quand il n'en reste qu'un, il est
+  présélectionné ; quand il n'en reste aucun, le bouton le dit et s'éteint.
+- **✎ Modifier** rouvre le dialogue sur ce type, nombres remplis. Le type
+  lui-même n'y change pas — c'est la clé de la ligne : pour changer de type, on
+  retire celui-ci et on en ajoute un autre.
+- **🗑 Retirer** l'enlève de la liste, sans confirmation : rien n'est encore
+  écrit en base, tout part à l'appui sur « Créer ».
+- La liste des types proposables est demandée au serveur à l'ouverture de la
+  fenêtre (`ServiceProjet.chargerTypes()`), et non lue dans
+  `Referentiels.typesUe` : cette liste codée en dur omet 6 des 19 types de la
+  base, et l'association se fait par identifiant (`tue_code_ident`). Si elle est
+  indisponible, un bandeau le dit, avec « Réessayer », et aucun type ne peut
+  être ajouté.
+
+### Ce que voit l'utilisateur
+
+- **« Créer » reste éteint** tant qu'un champ obligatoire manque — aucun type
+  ajouté compris —, et une phrase sous le formulaire dit lequel. Les nombres
+  planifiés, eux, sont vérifiés dans le dialogue, avant que le type n'entre
+  dans la liste.
+- **Un refus du serveur reste affiché** dans un bandeau rouge, au bas du
+  formulaire, jusqu'à la prochaine modification : un n° déjà pris (409) doit
+  rester sous les yeux le temps de le corriger, et le message nomme le projet
+  qui le porte. Le curseur revient alors sur le n°.
+- **Une réussite referme la fenêtre** avec une notification « Projet … créé
+  avec n type(s) d'UE ».
+
+### Enchaîner sur « Créer une UE »
+
+Les types ajoutés ici sont ceux que « Créer une UE » proposera pour ce projet
+(§6, « Les types d'UE suivent le projet choisi »).
+
+La liste des projets de « Créer une UE » vient de la couche `proje_sonda` du
+projet ouvert, qui ne verra le nouveau projet qu'après une synchronisation. Pour
+ne pas attendre, `Referentiels.ajouterProjet()` retient un projet créé **en
+production** et `chargerProjets()` l'ajoute à la liste tant que la couche ne le
+porte pas. Un projet en élaboration n'y apparaît pas : la liste ne montre que les
+projets en production, et la fenêtre le dit sous le choix du statut.
+
+### Ce qui reste à faire
+
+- `Referentiels.typesUe` reste codée en dur : c'est elle qui porte les
+  abréviations des types (« IPE », « ENS »…), que la base ne connaît pas. Une
+  colonne d'abréviation dans `type_unite_echan` permettrait de la remplacer par
+  `GET types-ue/`, et de composer l'identifiant pour tous les types.
+- Le passage d'un projet en production ou à « Terminé » relève de « Modifier un
+  projet ».
+
+---
+
+## 12. Afficher, modifier, supprimer un projet
+
+`FenetreModifierProjet.qml`, par `ServiceProjet.qml` et les points d'accès
+`projets-sondage/…` (README de `qfieldcloud.ifa`, §14). Deux vues dans la même
+fenêtre :
+
+```
+LISTE                                        DÉTAIL
+┌──────────────────────────────────────┐     ← Tous les projets
+│ [Rechercher par n° ou nom        ]   │     09-OG — Observations générales
+│ [Toutes les régions ▾]  ☐ Mes projets│     En production · créé par robma8 le …
+│ 166 projets                          │     ┌ Affichage seul. Ce projet est en ┐
+│ ┌──────────────────────────────────┐ │     └ production : seul un admin…      ┘
+│ │[2024] 09-OG : Observations gén.  │ │     (FormulaireProjet, champs grisés)
+│ │Région 09 · En production · 312 UE│ │
+│ └──────────────────────────────────┘ │     [Supprimer]  [Fermer]  [Enregistrer]
+└──────────────────────────────────────┘
+```
+
+- **La liste** vient du serveur — tous les projets, quel que soit leur statut —,
+  et se filtre à la frappe : n° ou nom, région, « Mes projets » (ceux dont
+  l'utilisateur est le créateur). Chaque ligne montre la région, le statut, le
+  nombre d'UE et le créateur, et une icône : crayon si le projet est
+  modifiable par l'utilisateur, œil s'il ne l'est qu'en affichage.
+- **Le détail** se relit sur le serveur à chaque ouverture : les droits, le
+  nombre d'UE et la date de dernière modification ont pu changer depuis la
+  liste. Le formulaire est `FormulaireProjet`, avec `champsModifiables` =
+  les droits rendus par le serveur ; les autres champs restent lisibles, grisés.
+  Le statut propose ici « Terminé » en plus.
+- **Un bandeau** en tête du détail dit ce qui est permis et pourquoi :
+  « Affichage seul. Ce projet est en production : seul un administrateur peut le
+  modifier. », ou « Ce projet est utilisé par 3 unité(s) d'échantillonnage :
+  seuls son nom et sa description sont modifiables. »
+- Le sous-titre de la fenêtre indique si l'utilisateur est **administrateur**
+  (membre `admin` d'`ifa_team`, ou superutilisateur).
+
+### Les règles
+
+| | Utilisateur standard | Administrateur |
+|---|---|---|
+| Modifier un projet en production | ✗ — affichage seul | ✓ |
+| Modifier un projet hors production | ✓ | ✓ |
+| … utilisé par une UE | nom et description seulement | nom et description seulement |
+| Supprimer son propre projet, hors production | ✓ | ✓ |
+| Supprimer un projet en production, ou celui d'un autre | ✗ | ✓ |
+| Supprimer un projet utilisé par une UE | ✗ | ✗ |
+
+Ce sont celles du serveur, qui les applique : la fenêtre ne fait que les
+montrer. Un projet utilisé par une UE n'est jamais supprimé, même par un
+administrateur — ses mesurages resteraient rattachés à un projet disparu (voir
+le README du serveur).
+
+### Enregistrer
+
+- « Enregistrer » ne s'allume que si quelque chose a changé
+  (`FormulaireProjet.modifie`) et que la saisie est complète. Seuls les champs
+  changés partent, avec la date de dernière modification lue à l'ouverture.
+- Si quelqu'un a modifié le projet entre-temps, le serveur refuse (409) et le
+  nomme ; le bandeau d'erreur offre **« Recharger le projet »**.
+- Après un enregistrement, le formulaire montre le projet tel que le serveur
+  l'a relu, et la liste de « Créer une UE » suit (`Referentiels.majProjet`) :
+  un projet renommé, sorti ou entré en production y est corrigé sans attendre
+  la synchronisation.
+- Revenir à la liste avec des modifications non enregistrées les abandonne ;
+  le bouton le dit (« ← Abandonner les modifications »).
+
+### Supprimer
+
+« Supprimer » est toujours visible dans le détail :
+
+1. **Si la suppression n'est pas permise**, une alerte (`DialogueAlerte`) en
+   donne la raison : « Seul le créateur du projet (kamdo1) ou un administrateur
+   peut le supprimer. », « Ce projet est en production : il ne peut plus être
+   supprimé que par un administrateur. », ou « Ce projet est utilisé par 312
+   unité(s) d'échantillonnage : il ne peut pas être supprimé… »
+2. **Si des modifications sont en cours**, une alerte demande de les
+   enregistrer ou de les abandonner d'abord.
+3. **Sinon**, `DialogueSuppressionProjet` demande confirmation : il nomme le
+   projet et le nombre de ses types d'UE, dit que l'action est irréversible, et
+   exige le **mot de passe QFieldCloud** de l'utilisateur. Le bouton
+   « Supprimer définitivement » reste éteint tant que le champ est vide.
+4. Le dialogue reste ouvert pendant l'appel. Un mot de passe faux s'affiche
+   sous le champ, qui se vide ; on peut recommencer ou annuler. Le mot de passe
+   n'est gardé nulle part : le champ se vide à l'envoi et à la fermeture.
+5. Une fois supprimé, le projet quitte la liste de la fenêtre et celle de
+   « Créer une UE » (`Referentiels.retirerProjet`).

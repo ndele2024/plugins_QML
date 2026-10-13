@@ -35,6 +35,26 @@
 //  serveur les inscrit comme **variables du projet livré**, où elles
 //  alimentent les valeurs par défaut du formulaire QGIS.
 //
+//  ---------------------------------------------------------------------------
+//  LES TYPES D'UE SUIVENT LE PROJET
+//  ---------------------------------------------------------------------------
+//  Le choix d'un projet restreint la liste des types d'UE à ceux que le projet
+//  prévoit (`proje_type_unite_echan`, saisie par « Créer un projet »). Ils sont
+//  demandés au serveur à chaque changement de projet, par `ServiceProjet`.
+//
+//  Tous les types sont proposés — la liste de `Referentiels.typesUe` — quand :
+//    * aucun projet n'est choisi ;
+//    * le projet ne prévoit aucun type (le cas des projets hérités) ;
+//    * les types du projet sont indisponibles (serveur injoignable, projet
+//      inconnu du serveur) : la saisie ne doit pas être bloquée pour autant.
+//  Une phrase sous la liste dit lequel de ces cas s'applique.
+//
+//  Les types du projet sont rapprochés de `Referentiels.typesUe` par leur
+//  libellé, pour garder l'abréviation qui compose l'identifiant (« IPE »). Un
+//  type du projet absent de cette liste (ADNe…) est proposé quand même, sans
+//  abréviation : l'identifiant garde alors « [type] » et doit être complété à
+//  la main.
+//
 //  Différences avec le plugin d'origine :
 //    * tous les accès aux couches passent par Referentiels et sont défensifs :
 //      une couche absente affiche un message, elle ne casse plus le plugin ;
@@ -67,6 +87,40 @@ IfaPopup {
 
   // Dernier résultat de recherche LCE ({ coucheDisponible, trouve, nom, mrc }).
   property var resultatLce: null
+
+  // ---- Types d'UE du projet choisi --------------------------------------------
+  // `null` tant qu'on ne les connaît pas ; un tableau, éventuellement vide,
+  // une fois reçus du serveur.
+  property var typesDuProjet: null
+
+  // "aucun-projet", "chargement", "filtre" (le projet prévoit des types),
+  // "tous" (il n'en prévoit aucun) ou "echec".
+  property string etatTypes: "aucun-projet"
+  property string messageTypes: ""
+
+  // Libellé du type choisi, pour le retrouver quand la liste change.
+  property string typeRetenu: ""
+
+  // La liste proposée : les types du projet s'il en prévoit, tous sinon.
+  readonly property var typesProposes: {
+    const tous = referentiels ? referentiels.typesUe : [];
+
+    if (!typesDuProjet || typesDuProjet.length === 0)
+      return tous;
+
+    const liste = [];
+    for (let i = 0; i < typesDuProjet.length; ++i) {
+      const nom = "" + typesDuProjet[i]["tue_nom"];
+      const connu = tous.find(function (t) {
+        return memeLibelle(t["nom"], nom);
+      });
+      liste.push(connu ? connu : {
+        "code": "",
+        "nom": nom
+      });
+    }
+    return liste;
+  }
 
 
   // ---- Filtre des données à embarquer ---------------------------------------
@@ -252,6 +306,9 @@ IfaPopup {
       // Toujours repartir d'une sélection vide quand la liste change.
       onModelChanged: currentIndex = -1
 
+      // Le projet choisi décide des types d'UE proposés plus bas.
+      onCurrentValueChanged: fenetre.chargerTypesDuProjet()
+
       displayText: currentIndex === -1 ? qsTr("Aucun projet sélectionné") : currentText
 
       delegate: ItemDelegate {
@@ -274,22 +331,44 @@ IfaPopup {
       color: Theme.secondaryTextColor
     }
 
-    ComboBox {
-      id: comboType
-
+    ColumnLayout {
       Layout.fillWidth: true
+      spacing: 2
 
-      textRole: "nom"
-      valueRole: "code"
-      currentIndex: -1
-      model: fenetre.referentiels ? fenetre.referentiels.typesUe : []
+      ComboBox {
+        id: comboType
 
-      onCurrentValueChanged: fenetre.composerIdentifiant()
+        Layout.fillWidth: true
 
-      delegate: ItemDelegate {
-        width: comboType.width
-        text: modelData["code"] + " : " + modelData["nom"]
-        font: Theme.tipFont
+        textRole: "nom"
+        valueRole: "code"
+        currentIndex: -1
+        model: fenetre.typesProposes
+
+        displayText: currentIndex === -1 ? qsTr("Aucun type sélectionné") : currentText
+
+        // La liste a changé avec le projet : on garde le type choisi s'il y
+        // figure encore. `callLater` laisse le ComboBox prendre son nouveau
+        // modèle avant qu'on y cherche.
+        onModelChanged: Qt.callLater(fenetre.retrouverType)
+
+        onActivated: fenetre.typeRetenu = currentText
+        onCurrentValueChanged: fenetre.composerIdentifiant()
+        onCurrentIndexChanged: fenetre.composerIdentifiant()
+
+        delegate: ItemDelegate {
+          width: comboType.width
+          text: modelData["code"] ? modelData["code"] + " : " + modelData["nom"] : modelData["nom"]
+          font: Theme.tipFont
+        }
+      }
+
+      Label {
+        Layout.fillWidth: true
+        text: fenetre.explicationTypes()
+        font: Theme.tinyFont
+        color: fenetre.etatTypes === "echec" ? Theme.warningColor : Theme.secondaryTextColor
+        wrapMode: Text.WordWrap
       }
     }
 
@@ -623,6 +702,26 @@ IfaPopup {
   ]
 
   // ===========================================================================
+  //  Types d'UE du projet choisi
+  // ===========================================================================
+  ServiceProjet {
+    id: serviceProjet
+
+    session: fenetre.session
+
+    onTypesDuProjetRecus: function (proNo, types) {
+      fenetre.typesDuProjet = types;
+      fenetre.etatTypes = types.length > 0 ? "filtre" : "tous";
+    }
+
+    onEchecTypesDuProjet: function (proNo, message, statut) {
+      fenetre.typesDuProjet = null;
+      fenetre.etatTypes = "echec";
+      fenetre.messageTypes = message;
+    }
+  }
+
+  // ===========================================================================
   //  Préparation du projet de saisie
   // ===========================================================================
   //  Création de l'unité et projet `formulaire_UE_IFA` sur le serveur, attente
@@ -691,6 +790,65 @@ IfaPopup {
     const type = comboType.currentValue ? comboType.currentValue : "[type]";
 
     champIdentifiant.text = region + "-" + lce + "-" + type;
+  }
+
+  // ---- Types d'UE du projet ----------------------------------------------------
+  // Demande au serveur les types du projet choisi. Sans projet, ou sans
+  // serveur, tous les types restent proposés.
+  function chargerTypesDuProjet() {
+    serviceProjet.oublierTypesDuProjet();
+    typesDuProjet = null;
+    messageTypes = "";
+
+    const numero = comboProjet.currentIndex >= 0 && comboProjet.currentValue ? "" + comboProjet.currentValue : "";
+
+    if (numero === "") {
+      etatTypes = "aucun-projet";
+      return;
+    }
+
+    if (!serveurJoignable) {
+      etatTypes = "echec";
+      messageTypes = qsTr("aucune connexion QFieldCloud");
+      return;
+    }
+
+    etatTypes = "chargement";
+    serviceProjet.chargerTypesDuProjet(numero);
+  }
+
+  // Rétablit le type choisi dans la nouvelle liste, ou vide la sélection s'il
+  // n'y figure plus.
+  function retrouverType() {
+    comboType.currentIndex = typeRetenu === "" ? -1 : comboType.find(typeRetenu);
+    composerIdentifiant();
+  }
+
+  function memeLibelle(a, b) {
+    return ("" + a).trim().toLowerCase() === ("" + b).trim().toLowerCase();
+  }
+
+  // La phrase sous la liste des types : d'où vient la liste, et ce qui reste
+  // à faire si le type choisi n'a pas d'abréviation.
+  function explicationTypes() {
+    const projet = comboProjet.currentIndex >= 0 ? comboProjet.currentText : "";
+    let phrase;
+
+    if (etatTypes === "chargement")
+      phrase = qsTr("Recherche des types d'UE du projet…");
+    else if (etatTypes === "filtre")
+      phrase = qsTr("%n type(s) d'UE prévu(s) par le projet %1.", "", typesDuProjet ? typesDuProjet.length : 0).arg(projet);
+    else if (etatTypes === "tous")
+      phrase = qsTr("Le projet %1 ne prévoit aucun type d'UE : tous les types sont proposés.").arg(projet);
+    else if (etatTypes === "echec")
+      phrase = qsTr("Types du projet indisponibles (%1) : tous les types sont proposés.").arg(messageTypes);
+    else
+      phrase = qsTr("Tous les types d'UE sont proposés. Choisissez un projet pour ne voir que les siens.");
+
+    if (comboType.currentIndex >= 0 && !comboType.currentValue)
+      phrase += " " + qsTr("« %1 » n'a pas d'abréviation connue : complétez l'identifiant à la main.").arg(comboType.currentText);
+
+    return phrase;
   }
 
   // Présélectionne la région : variable de projet si elle existe, sinon

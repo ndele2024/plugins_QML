@@ -31,8 +31,13 @@
 //    Referentiels.qml          listes de référence + accès aux couches
 //    SessionCloud.qml          jeton et appels authentifiés à QFieldCloud
 //    ServiceUE.qml             recherche des UE sur le serveur
+//    ServiceProjet.qml         création d'un projet de sondage sur le serveur
 //    PasseurProjet.qml         rapatrie et ouvre un projet QFieldCloud
 //    DialogueAttente.qml       fenêtre d'attente centrée pendant l'ouverture
+//    DialogueTypeUe.qml        ajout d'un type d'UE à un projet, et ses nombres planifiés
+//    FormulaireProjet.qml      champs d'un projet, communs à la création et à la modification
+//    DialogueAlerte.qml        alerte d'information (raison d'un refus)
+//    DialogueSuppressionProjet.qml  confirmation de suppression, avec mot de passe
 //    ServiceMiseAJour.qml      mise à jour du plugin depuis le serveur
 //    DialogueMiseAJour.qml     proposition de la nouvelle version
 //    Fenetre*.qml              une fenêtre par commande
@@ -68,14 +73,14 @@ Item {
         {
           "id": "projet_creer",
           "titre": qsTr("Créer un projet"),
-          "soustitre": qsTr("Déclarer un projet et ses types d'UE"),
+          "soustitre": qsTr("N°, nom, année, région et statut"),
           "icone": "ic_add_white_24dp",
           "fichier": "FenetreCreerProjet.qml"
         },
         {
           "id": "projet_modifier",
-          "titre": qsTr("Modifier / Afficher un projet"),
-          "soustitre": qsTr("Consulter ou corriger un projet existant"),
+          "titre": qsTr("Modifier / Afficher / Supprimer un projet"),
+          "soustitre": qsTr("Consulter, corriger ou supprimer un projet existant"),
           "icone": "ic_edit_attributes_white_24dp",
           "fichier": "FenetreModifierProjet.qml"
         }
